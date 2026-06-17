@@ -1,0 +1,5 @@
+ARG BASE_IMAGE=us-central1-docker.pkg.dev/imposing-kayak-422917-b0/batch-processor/gpu-ingestion-service:latest
+FROM ${BASE_IMAGE}
+
+WORKDIR /srv/gpu-ingestion-service
+COPY app ./app
