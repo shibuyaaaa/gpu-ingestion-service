@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,9 @@ class AllInOneRuntime:
     def _analyze_sync(self, audio_path: Path, output_dir: Path) -> dict[str, Any]:
         if self._allin1 is None:
             raise RuntimeError("all-in-one runtime is not loaded")
+        byproduct_root = output_dir / "byproducts"
+        byproduct_root.mkdir(parents=True, exist_ok=True)
+        self._ensure_static_models_link(byproduct_root)
         result = self._allin1.analyze(
             paths=[str(audio_path)],
             out_dir=str(output_dir),
@@ -73,7 +77,9 @@ class AllInOneRuntime:
             sonify=False,
             include_activations=False,
             include_embeddings=False,
-            keep_byproducts=True,
+            demix_dir=str(byproduct_root / "demix"),
+            spec_dir=str(byproduct_root / "spec"),
+            keep_byproducts=False,
         )
         analysis_path = self._find_analysis_json(output_dir)
         analysis: dict[str, Any] = {}
@@ -84,6 +90,17 @@ class AllInOneRuntime:
             "analyzer_result_path": str(analysis_path) if analysis_path else None,
             "raw_result": str(result),
         }
+
+    @staticmethod
+    def _ensure_static_models_link(byproduct_root: Path) -> None:
+        """all-in-one resolves Demucs models as demix_dir.parent/static_models."""
+        link_path = byproduct_root / "static_models"
+        if link_path.exists():
+            return
+        source = Path("/opt/all-in-one-audio/static_models")
+        if not source.is_dir():
+            raise RuntimeError(f"all-in-one static model directory is missing: {source}")
+        os.symlink(source, link_path, target_is_directory=True)
 
     @staticmethod
     def _find_analysis_json(output_dir: Path) -> Path | None:
