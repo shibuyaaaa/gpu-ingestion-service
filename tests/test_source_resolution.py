@@ -38,3 +38,18 @@ def test_source_aliases_are_accepted(field):
 def test_source_is_required():
     with pytest.raises(RuntimeError):
         BulkDissectAdapter._source_from_payload({"local_path": "/tmp/song.wav"})
+
+
+def test_chorus_fallback_uses_longest_useful_segment():
+    segment = BulkDissectAdapter._find_chorus_segment(
+        [
+            {"id": "seg-0", "start": 0.0, "end": 0.08, "label": "start"},
+            {"id": "seg-1", "start": 0.08, "end": 27.59, "label": "intro"},
+            {"id": "seg-2", "start": 27.59, "end": 49.78, "label": "solo"},
+            {"id": "seg-3", "start": 49.78, "end": 70.09, "label": "solo"},
+            {"id": "seg-4", "start": 70.09, "end": 110.09, "label": "solo"},
+            {"id": "seg-5", "start": 200.1, "end": 205.19, "label": "end"},
+        ]
+    )
+
+    assert segment["id"] == "seg-4"

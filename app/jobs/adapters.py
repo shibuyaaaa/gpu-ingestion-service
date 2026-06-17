@@ -220,7 +220,19 @@ class DissectAdapter(JobAdapter):
     @staticmethod
     def _find_chorus_segment(segments: list[dict[str, Any]]) -> dict[str, Any]:
         choruses = [segment for segment in segments if "chorus" in segment["label"].lower()]
-        return choruses[2] if len(choruses) >= 3 else choruses[1] if len(choruses) >= 2 else choruses[0] if choruses else segments[0]
+        if choruses:
+            return choruses[2] if len(choruses) >= 3 else choruses[1] if len(choruses) >= 2 else choruses[0]
+
+        def duration(segment: dict[str, Any]) -> float:
+            return float(segment["end"]) - float(segment["start"])
+
+        useful = [
+            segment
+            for segment in segments
+            if duration(segment) >= 5.0
+            and segment["label"].lower() not in {"start", "end", "outro", "silence"}
+        ]
+        return max(useful or segments, key=duration)
 
 
 class BulkDissectAdapter(DissectAdapter):
