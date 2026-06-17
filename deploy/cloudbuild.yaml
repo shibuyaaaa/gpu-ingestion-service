@@ -5,7 +5,7 @@ steps:
       - -f
       - deploy/Dockerfile
       - -t
-      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/batch-processor/gpu-ingestion-service:${SHORT_SHA}
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/batch-processor/gpu-ingestion-service:${BUILD_ID}
       - -t
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/batch-processor/gpu-ingestion-service:latest
       - .
@@ -17,4 +17,3 @@ steps:
 
 substitutions:
   _REGION: us-central1
-
