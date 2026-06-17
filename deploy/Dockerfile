@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
     libsndfile1 \
+    nodejs \
     python3.10 \
     python3.10-dev \
     python3-pip \

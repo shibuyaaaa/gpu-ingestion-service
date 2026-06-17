@@ -72,6 +72,7 @@ async def download_youtube_audio(youtube_url: str, output_dir: str | Path) -> st
     template = str(output / "source.%(ext)s")
     proc = await asyncio.create_subprocess_exec(
         "yt-dlp",
+        *_yt_dlp_js_args(),
         "-x",
         "--audio-format",
         "wav",
@@ -100,6 +101,7 @@ async def get_youtube_metadata(youtube_url: str) -> dict[str, Any]:
         raise RuntimeError("yt-dlp is not installed")
     proc = await asyncio.create_subprocess_exec(
         "yt-dlp",
+        *_yt_dlp_js_args(),
         "--dump-json",
         "--no-download",
         "--no-warnings",
@@ -259,6 +261,7 @@ async def _search_youtube(query: str, *, max_results: int) -> list[dict[str, Any
         raise RuntimeError("yt-dlp is not installed")
     proc = await asyncio.create_subprocess_exec(
         "yt-dlp",
+        *_yt_dlp_js_args(),
         f"ytsearch{max_results}:{query}",
         "--dump-json",
         "--no-download",
@@ -280,6 +283,16 @@ async def _search_youtube(query: str, *, max_results: int) -> list[dict[str, Any
         except json.JSONDecodeError:
             continue
     return results
+
+
+def _yt_dlp_js_args() -> list[str]:
+    node = shutil.which("node")
+    if node:
+        return ["--js-runtimes", f"node:{node}"]
+    deno = shutil.which("deno")
+    if deno:
+        return ["--js-runtimes", f"deno:{deno}"]
+    return []
 
 
 def _is_youtube_match(result: dict[str, Any], *, artist: str, title: str, expected_duration: float) -> bool:

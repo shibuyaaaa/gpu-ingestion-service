@@ -1,5 +1,8 @@
 ARG BASE_IMAGE=us-central1-docker.pkg.dev/imposing-kayak-422917-b0/batch-processor/gpu-ingestion-service:latest
 FROM ${BASE_IMAGE}
 
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /srv/gpu-ingestion-service
 COPY app ./app
