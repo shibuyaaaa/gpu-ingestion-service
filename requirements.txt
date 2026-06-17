@@ -10,7 +10,7 @@ google-auth
 asyncpg
 yt-dlp>=2026.01.01
 librosa==0.11.0
-numpy
+numpy>=1.26,<2
 soundfile
 torch>=2.0.0
 torchaudio
