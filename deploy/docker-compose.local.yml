@@ -1,0 +1,24 @@
+services:
+  gpu-ingestion-service:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      SERVICE_NAME: gpu-ingestion-service
+      QUEUE_DB_PATH: /var/lib/gpu-ingestion/queue.sqlite3
+      WORK_DIR: /var/lib/gpu-ingestion/tmp
+      START_WORKERS: "true"
+      DRY_RUN_MODE: "true"
+      MAX_TOTAL_QUEUE_DEPTH: "200"
+      DOWNLOAD_WORKERS: "2"
+      DOWNLOAD_BATCH_SIZE: "2"
+      ANALYZE_BATCH_SIZE: "1"
+      PROCESS_WORKERS: "1"
+      PROCESS_BATCH_SIZE: "1"
+    ports:
+      - "8080:8080"
+    volumes:
+      - gpu-ingestion-data:/var/lib/gpu-ingestion
+
+volumes:
+  gpu-ingestion-data:

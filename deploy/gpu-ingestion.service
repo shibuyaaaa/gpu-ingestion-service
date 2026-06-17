@@ -1,0 +1,21 @@
+[Unit]
+Description=Shibuya GPU Ingestion Service
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/gpu-ingestion.env
+ExecStartPre=/usr/bin/mkdir -p /var/lib/gpu-ingestion/tmp
+ExecStart=/usr/bin/docker run --rm --gpus all --name gpu-ingestion-service \
+  --network host \
+  --env-file /etc/gpu-ingestion.env \
+  -v /var/lib/gpu-ingestion:/var/lib/gpu-ingestion \
+  us-central1-docker.pkg.dev/imposing-kayak-422917-b0/batch-processor/gpu-ingestion-service:latest
+ExecStop=/usr/bin/docker stop gpu-ingestion-service
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

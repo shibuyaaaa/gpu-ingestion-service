@@ -1,0 +1,2 @@
+"""Local GPU ingestion service."""
+

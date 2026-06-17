@@ -1,0 +1,11 @@
+[project]
+name = "gpu-ingestion-service"
+version = "0.1.0"
+description = "Local-first GPU ingestion worker for Shibuya audio jobs"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
