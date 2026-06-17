@@ -32,6 +32,7 @@ RUN git clone "${ALL_IN_ONE_REPO}" all-in-one-audio \
     && git checkout "${ALL_IN_ONE_REF}"
 
 WORKDIR /opt/all-in-one-audio
+RUN sed -i '/audio-separator/d' requirements.txt
 RUN python3.10 -m pip install --no-cache-dir \
       --extra-index-url https://download.pytorch.org/whl/cu118 \
       torch==2.0.1+cu118 \
