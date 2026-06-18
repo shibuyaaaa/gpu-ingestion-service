@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import shutil
 import socket
+import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from app.jobs import JobRegistry
@@ -46,6 +49,14 @@ class WorkerManager:
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._states: dict[str, WorkerState] = {}
+        self._cleanup_state: dict[str, Any] = {
+            "enabled": context.settings.work_dir_cleanup_enabled,
+            "runs": 0,
+            "dirs_removed": 0,
+            "bytes_removed": 0,
+            "last_run_at": None,
+            "last_error": None,
+        }
 
     async def start(self) -> None:
         if self._tasks:
@@ -65,6 +76,8 @@ class WorkerManager:
                 [JobStage.PROCESS],
                 self.context.settings.process_batch_size,
             )
+        if self.context.settings.work_dir_cleanup_enabled:
+            self._tasks.append(asyncio.create_task(self._cleanup_loop(), name="work-dir-cleanup"))
         logger.info("started %d local workers", len(self._tasks))
 
     async def stop(self) -> None:
@@ -121,11 +134,64 @@ class WorkerManager:
         finally:
             state.active_job_ids = [job_id for job_id in state.active_job_ids if job_id != job.id]
 
+    async def _cleanup_loop(self) -> None:
+        while not self._stop_event.is_set():
+            await self._cleanup_once()
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=max(1.0, self.context.settings.work_dir_cleanup_interval_seconds),
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _cleanup_once(self) -> None:
+        self._cleanup_state["runs"] += 1
+        self._cleanup_state["last_run_at"] = time.time()
+        try:
+            work_dirs = self.context.store.inactive_work_dirs(
+                older_than_seconds=self.context.settings.work_dir_cleanup_min_age_seconds,
+                limit=self.context.settings.work_dir_cleanup_max_dirs_per_run,
+            )
+            removed_count = 0
+            removed_bytes = 0
+            for work_dir in work_dirs:
+                path = Path(work_dir)
+                if not self._cleanup_path_allowed(path):
+                    logger.warning("skipping cleanup outside work dir: %s", path)
+                    continue
+                size = await asyncio.to_thread(_directory_size, path)
+                await asyncio.to_thread(shutil.rmtree, path, True)
+                removed_count += 1
+                removed_bytes += size
+            self._cleanup_state["dirs_removed"] += removed_count
+            self._cleanup_state["bytes_removed"] += removed_bytes
+            self._cleanup_state["last_error"] = None
+            if removed_count:
+                logger.info("cleaned %d inactive work dirs freeing %.2f GiB", removed_count, removed_bytes / (1024**3))
+        except Exception as exc:
+            logger.exception("work dir cleanup failed")
+            self._cleanup_state["last_error"] = str(exc)
+
+    def _cleanup_path_allowed(self, path: Path) -> bool:
+        try:
+            resolved = path.resolve()
+            work_root = self.context.settings.work_dir.resolve()
+            return resolved.is_dir() and resolved.is_relative_to(work_root)
+        except Exception:
+            return False
+
     def state(self) -> dict[str, Any]:
         return {
             "accepting": self.accepting,
             "workers": [state.to_dict() for state in self._states.values()],
             "running_tasks": len([task for task in self._tasks if not task.done()]),
+            "work_dir_cleanup": {
+                **self._cleanup_state,
+                "bytes_removed_gib": round(float(self._cleanup_state["bytes_removed"]) / (1024**3), 3),
+                "interval_seconds": self.context.settings.work_dir_cleanup_interval_seconds,
+                "min_age_seconds": self.context.settings.work_dir_cleanup_min_age_seconds,
+            },
             "scheduling": {
                 "download_batch_size": self.context.settings.download_batch_size,
                 "analyze_batch_size": self.context.settings.analyze_batch_size,
@@ -134,3 +200,16 @@ class WorkerManager:
                 "stages": [stage.value for stage in JobStage],
             },
         }
+
+
+def _directory_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total

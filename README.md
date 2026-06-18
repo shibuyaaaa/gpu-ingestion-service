@@ -65,6 +65,8 @@ run with `DRY_RUN_MODE=false`.
 - `ANALYZE_BATCH_SIZE`: analyze-stage jobs per GPU loop. Default: `1` for one L4.
 - `PROCESS_WORKERS`, `PROCESS_BATCH_SIZE`: process-stage segment workers.
 - `JOB_LEASE_TIMEOUT_SECONDS`: startup recovery timeout for crashed workers.
+- `WORK_DIR_CLEANUP_*`: terminal job workdir cleanup. The service removes only
+  workdirs no non-terminal job still references.
 - `MODEL_BACKEND`: `local`, `remote_gpu`, or `cloud_run_fallback`. Default: `local`.
 - `ALL_IN_ONE_GCP_URL`: Cloud Run all-in-one `/predict` service URL for remote GPU mode.
 - `ALL_IN_ONE_AUTH`: `none`, `api_key`, `google_id_token`, or `gcloud_identity_token`.

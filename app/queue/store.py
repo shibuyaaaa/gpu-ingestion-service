@@ -457,6 +457,33 @@ class JobStore:
             self.add_event(job_id, JobEventType.LEASE_RECOVERED, message="requeued stale processing job")
         return len(job_ids)
 
+    def inactive_work_dirs(self, *, older_than_seconds: float, limit: int = 100) -> list[str]:
+        cutoff = time.time() - older_than_seconds
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    json_extract(artifacts_json, '$.work_dir') AS work_dir,
+                    MAX(updated_at) AS last_updated_at,
+                    SUM(
+                        CASE
+                            WHEN status NOT IN (?, ?) THEN 1
+                            ELSE 0
+                        END
+                    ) AS active_count
+                FROM jobs
+                WHERE json_extract(artifacts_json, '$.work_dir') IS NOT NULL
+                  AND json_extract(artifacts_json, '$.work_dir') != ''
+                GROUP BY work_dir
+                HAVING active_count = 0
+                   AND last_updated_at <= ?
+                ORDER BY last_updated_at ASC
+                LIMIT ?
+                """,
+                (JobStatus.COMPLETED.value, JobStatus.FAILED.value, cutoff, max(0, limit)),
+            ).fetchall()
+        return [str(row["work_dir"]) for row in rows]
+
     def stats(self) -> dict[str, Any]:
         with self._connect() as conn:
             by_stage = {

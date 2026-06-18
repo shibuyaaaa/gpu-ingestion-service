@@ -199,6 +199,52 @@ def test_recover_stale_processing_jobs():
         assert job.worker_id is None
 
 
+def test_inactive_work_dirs_returns_only_terminal_dirs():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        old_dir = str(Path(tmp) / "old")
+        active_dir = str(Path(tmp) / "active")
+        old, _ = store.enqueue(
+            {"job_id": "old", "job_type": "bulk_dissect", "source": "song"},
+            initial_artifacts={"work_dir": old_dir},
+        )
+        active, _ = store.enqueue(
+            {"job_id": "active", "job_type": "bulk_dissect", "source": "song"},
+            initial_artifacts={"work_dir": active_dir},
+        )
+        store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        store.complete_stage(old.id, next_stage=None)
+
+        dirs = store.inactive_work_dirs(older_than_seconds=0, limit=10)
+
+        assert old_dir in dirs
+        assert active_dir not in dirs
+
+
+def test_inactive_work_dirs_keeps_terminal_parent_with_active_child():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        work_dir = str(Path(tmp) / "shared")
+        parent, _ = store.enqueue(
+            {"job_id": "root", "job_type": "bulk_dissect", "source": "song"},
+            initial_artifacts={"work_dir": work_dir},
+        )
+        store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-0:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"work_dir": work_dir, "process_mode": "segment_chord", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        store.complete_stage(parent.id, next_stage=None)
+
+        dirs = store.inactive_work_dirs(older_than_seconds=0, limit=10)
+
+        assert work_dir not in dirs
+
+
 def test_reconcile_failed_fanout_parent_when_children_completed():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
