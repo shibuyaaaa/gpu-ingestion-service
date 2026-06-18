@@ -111,7 +111,7 @@ class JobStore:
         job_type = JobType(str(payload.get("job_type") or "unknown"))
         job_id = str(payload.get("job_id") or payload.get("id") or uuid.uuid4())
         job_priority = self._resolve_priority(payload, priority, job_type)
-        artifacts_json = json.dumps(initial_artifacts or {})
+        artifacts_json = _json_dumps(initial_artifacts or {})
         now = time.time()
         with self._lock, self._connect() as conn:
             current_depth = conn.execute(
@@ -142,7 +142,7 @@ class JobStore:
                     job_type.value,
                     initial_stage.value,
                     JobStatus.QUEUED.value,
-                    json.dumps(payload),
+                    _json_dumps(payload),
                     artifacts_json,
                     max_attempts,
                     job_priority,
@@ -188,6 +188,43 @@ class JobStore:
             parent_job.id,
             JobEventType.CONTINUATION_ENQUEUED,
             data={"continuation_job_id": job.id, "created": created},
+        )
+        return job
+
+    def enqueue_process_child(
+        self,
+        *,
+        parent_job: JobRecord,
+        child_id: str,
+        job_type: JobType,
+        payload: dict[str, Any],
+        artifacts: dict[str, Any],
+        priority: int,
+    ) -> JobRecord:
+        child_payload = {
+            **payload,
+            "job_id": child_id,
+            "job_type": job_type.value,
+            "parent_job_id": parent_job.id,
+            "root_job_id": payload.get("root_job_id") or parent_job.payload.get("root_job_id") or parent_job.id,
+        }
+        job, created = self.enqueue(
+            child_payload,
+            priority=priority,
+            initial_stage=JobStage.PROCESS,
+            initial_artifacts=artifacts,
+        )
+        self.add_event(
+            parent_job.id,
+            JobEventType.PROCESS_CHILD_ENQUEUED,
+            data={
+                "child_job_id": job.id,
+                "created": created,
+                "job_type": job.job_type.value,
+                "priority": job.priority,
+                "process_mode": artifacts.get("process_mode"),
+                "segment_id": artifacts.get("segment_id"),
+            },
         )
         return job
 
@@ -278,7 +315,7 @@ class JobStore:
                     available_at = ?
                 WHERE id = ?
                 """,
-                (stage.value, status.value, json.dumps(merged_artifacts), now, now, job_id),
+                (stage.value, status.value, _json_dumps(merged_artifacts), now, now, job_id),
             )
         self.add_event(
             job_id,
@@ -339,6 +376,51 @@ class JobStore:
         if record is None:
             raise KeyError(job_id)
         return record
+
+    def reconcile_failed_fanout_parent(self, root_job_id: str) -> JobRecord | None:
+        record = self.get(root_job_id)
+        if record is None or record.status != JobStatus.FAILED:
+            return record
+        summary = self.child_summary(root_job_id)
+        if summary["total"] <= 0 or summary["active"] > 0 or summary["failed"] > 0:
+            return record
+
+        now = time.time()
+        artifacts = {
+            **record.artifacts,
+            "fanout_reconciled": {
+                "completed_children": summary["completed"],
+                "reconciled_at": now,
+            },
+        }
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    worker_id = NULL,
+                    error = NULL,
+                    artifacts_json = ?,
+                    updated_at = ?,
+                    available_at = ?
+                WHERE id = ?
+                  AND status = ?
+                """,
+                (
+                    JobStatus.COMPLETED.value,
+                    _json_dumps(artifacts),
+                    now,
+                    now,
+                    root_job_id,
+                    JobStatus.FAILED.value,
+                ),
+            )
+        self.add_event(
+            root_job_id,
+            JobEventType.FANOUT_PARENT_RECONCILED,
+            data={"child_summary": summary},
+        )
+        return self.get(root_job_id)
 
     def recover_stale_processing(self, *, lease_timeout_seconds: int) -> int:
         cutoff = time.time() - lease_timeout_seconds
@@ -449,6 +531,34 @@ class JobStore:
             for row in rows
         ]
 
+    def child_summary(self, root_job_id: str, *, exclude_job_id: str | None = None) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, status, payload_json FROM jobs").fetchall()
+        total = active = completed = failed = 0
+        for row in rows:
+            if exclude_job_id and row["id"] == exclude_job_id:
+                continue
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError:
+                continue
+            if payload.get("root_job_id") != root_job_id:
+                continue
+            total += 1
+            status = row["status"]
+            if status == JobStatus.COMPLETED.value:
+                completed += 1
+            elif status == JobStatus.FAILED.value:
+                failed += 1
+            else:
+                active += 1
+        return {
+            "total": total,
+            "active": active,
+            "completed": completed,
+            "failed": failed,
+        }
+
     def add_event(
         self,
         job_id: str,
@@ -463,7 +573,7 @@ class JobStore:
                 INSERT INTO job_events (job_id, event_type, message, data_json, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (job_id, str(event_type), message, json.dumps(data or {}), time.time()),
+                (job_id, str(event_type), message, _json_dumps(data or {}), time.time()),
             )
 
     @staticmethod
@@ -496,3 +606,7 @@ class JobStore:
 
 def _stage_value(stage: JobStage | str) -> str:
     return stage.value if isinstance(stage, JobStage) else JobStage(str(stage)).value
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, default=str)

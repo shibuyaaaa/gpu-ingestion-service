@@ -5,7 +5,6 @@ python-dotenv
 httpx
 aiofiles
 google-cloud-storage
-google-cloud-pubsub
 google-auth
 asyncpg
 yt-dlp>=2026.01.01

@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings
+from app.library_membership import LibraryMembershipChecker
+from app.library_writer import LibraryWriter
 from app.legacy.db import DBClient
 from app.legacy.utils import GCSClient
 from app.models import ModelRuntimeBundle
@@ -16,6 +18,8 @@ class JobContext:
     models: ModelRuntimeBundle
     gcs: GCSClient
     db: DBClient
+    library: LibraryMembershipChecker
+    library_writer: LibraryWriter
 
     def job_work_dir(self, job: JobRecord) -> Path:
         target = self.settings.work_dir / "jobs" / job.id
@@ -24,4 +28,3 @@ class JobContext:
 
     def merged_payload(self, job: JobRecord) -> dict[str, Any]:
         return {**job.payload, "_artifacts": job.artifacts}
-

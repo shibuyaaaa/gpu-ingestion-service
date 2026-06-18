@@ -21,6 +21,12 @@ _spotify_token_expires_at = 0.0
 
 async def resolve_spotify_source(source: str, *, max_youtube_results: int = 5) -> dict[str, Any]:
     """Resolve a Spotify song name/link into a YouTube URL and metadata."""
+    resolved = await resolve_source_metadata(source)
+    return await resolve_youtube_match(resolved, max_youtube_results=max_youtube_results)
+
+
+async def resolve_source_metadata(source: str) -> dict[str, Any]:
+    """Resolve source metadata without doing YouTube search/download for Spotify inputs."""
     youtube_id = extract_youtube_video_id(source)
     if youtube_id:
         youtube_match = await get_youtube_metadata(source)
@@ -46,11 +52,21 @@ async def resolve_spotify_source(source: str, *, max_youtube_results: int = 5) -
             "youtube_url": youtube_match["url"],
         }
     spotify_track = await _spotify_track_from_source(source)
-    youtube_match = await _find_youtube_match(spotify_track, max_results=max_youtube_results)
-    if youtube_match is None:
-        raise RuntimeError(f"could not find YouTube match for Spotify source: {source}")
     return {
         "source": source,
+        "spotify_metadata": spotify_track,
+    }
+
+
+async def resolve_youtube_match(resolved: dict[str, Any], *, max_youtube_results: int = 5) -> dict[str, Any]:
+    if resolved.get("youtube_url") and resolved.get("youtube_match"):
+        return resolved
+    spotify_track = resolved["spotify_metadata"]
+    youtube_match = await _find_youtube_match(spotify_track, max_results=max_youtube_results)
+    if youtube_match is None:
+        raise RuntimeError(f"could not find YouTube match for Spotify source: {resolved.get('source')}")
+    return {
+        **resolved,
         "spotify_metadata": spotify_track,
         "youtube_match": youtube_match,
         "youtube_url": youtube_match["url"],
@@ -286,12 +302,12 @@ async def _search_youtube(query: str, *, max_results: int) -> list[dict[str, Any
 
 
 def _yt_dlp_js_args() -> list[str]:
-    node = shutil.which("node")
-    if node:
-        return ["--js-runtimes", f"node:{node}"]
     deno = shutil.which("deno")
     if deno:
-        return ["--js-runtimes", f"deno:{deno}"]
+        return ["--js-runtimes", f"deno:{deno}", "--remote-components", "ejs:github"]
+    node = shutil.which("node")
+    if node:
+        return ["--js-runtimes", f"node:{node}", "--remote-components", "ejs:github"]
     return []
 
 

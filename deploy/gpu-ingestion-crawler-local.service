@@ -1,0 +1,25 @@
+[Unit]
+Description=Shibuya GPU Ingestion Popular-Song Crawler
+After=network-online.target docker.service gpu-ingestion.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Environment=CRAWLER_CPUSET=3
+EnvironmentFile=/etc/gpu-ingestion.env
+TimeoutStartSec=300
+ExecStartPre=/usr/bin/mkdir -p /var/lib/gpu-ingestion
+ExecStart=/usr/bin/docker run --rm --name gpu-ingestion-crawler \
+  --network host \
+  --cpuset-cpus=${CRAWLER_CPUSET} \
+  --env-file /etc/gpu-ingestion.env \
+  -v /var/lib/gpu-ingestion:/var/lib/gpu-ingestion \
+  gpu-ingestion-service:local \
+  python3.10 -m app.crawler.runner
+ExecStop=/usr/bin/docker stop gpu-ingestion-crawler
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

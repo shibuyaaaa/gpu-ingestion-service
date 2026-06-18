@@ -31,14 +31,16 @@ curl http://127.0.0.1:8080/ops/gpu
 
 ## Ingress
 
-Use `POST /pubsub` for Pub/Sub push delivery and `POST /jobs` for manual replay
-or shadow testing. Jobs are committed directly to the local SQLite/WAL queue
-before the API returns success.
+Use `POST /jobs` for VM-local crawler delivery, manual replay, and shadow
+testing. `POST /pubsub` is kept only for legacy-compatible wrapped messages.
+Jobs are committed directly to the local SQLite/WAL queue before the API returns
+success.
 
 ## Rollback
 
-Do not delete the legacy Cloud Run worker. Rollback is repointing the publisher
-or subscription back to the old Cloud Run endpoint and draining this service:
+Do not delete the legacy Cloud Run worker. Rollback is stopping the crawler or
+repointing external publishers back to the old Cloud Run endpoint, then draining
+this service:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/ops/drain

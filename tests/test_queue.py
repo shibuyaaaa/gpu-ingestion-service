@@ -1,9 +1,16 @@
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
+from app.jobs.adapters import (
+    PROCESS_PRIORITY_BULK_CHORD,
+    PROCESS_PRIORITY_BULK_OTHER,
+    PROCESS_PRIORITY_QUICK_CHORD,
+    PROCESS_PRIORITY_QUICK_OTHER,
+)
 from app.queue import JobStage, JobStatus, JobStore, JobType, QueueFull
 
 
@@ -54,6 +61,19 @@ def test_claim_complete_and_retry_flow():
         assert failed.attempts == 1
 
 
+def test_complete_stage_serializes_uuid_artifacts():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        song_id = uuid.uuid4()
+        store.enqueue({"job_id": "a", "job_type": "bulk_dissect", "source": "song"})
+        store.claim_next([JobStage.DOWNLOAD], "worker-1")
+
+        completed = store.complete_stage("a", next_stage=None, artifacts={"library_song_id": song_id})
+
+        assert completed.status == JobStatus.COMPLETED
+        assert completed.artifacts["library_song_id"] == str(song_id)
+
+
 def test_fail_stage_respects_max_attempts():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
@@ -91,6 +111,31 @@ def test_claim_batch_prioritizes_higher_priority_jobs():
         claimed = store.claim_batch([JobStage.DOWNLOAD], "worker-1", limit=2)
 
         assert [job.id for job in claimed] == ["quick", "bulk"]
+
+
+def test_process_claim_order_prioritizes_chords_before_other_stems():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "quick_dissect", "source": "song"})
+        children = [
+            ("bulk-other", JobType.BULK_DISSECT, PROCESS_PRIORITY_BULK_OTHER),
+            ("quick-other", JobType.QUICK_DISSECT, PROCESS_PRIORITY_QUICK_OTHER),
+            ("bulk-chord", JobType.BULK_DISSECT, PROCESS_PRIORITY_BULK_CHORD),
+            ("quick-chord", JobType.QUICK_DISSECT, PROCESS_PRIORITY_QUICK_CHORD),
+        ]
+        for job_id, job_type, priority in children:
+            store.enqueue_process_child(
+                parent_job=parent,
+                child_id=job_id,
+                job_type=job_type,
+                payload={"source": "song", "root_job_id": "root"},
+                artifacts={"process_mode": "segment_chord", "segment_id": job_id},
+                priority=priority,
+            )
+
+        claimed = store.claim_batch([JobStage.PROCESS], "process-worker", limit=4)
+
+        assert [job.id for job in claimed] == ["quick-chord", "bulk-chord", "quick-other", "bulk-other"]
 
 
 def test_quick_process_job_preempts_bulk_process_backlog_after_current_claim():
@@ -152,6 +197,62 @@ def test_recover_stale_processing_jobs():
         job = store.get("a")
         assert job.status == JobStatus.QUEUED
         assert job.worker_id is None
+
+
+def test_reconcile_failed_fanout_parent_when_children_completed():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        child = store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-0:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        store.claim_next([JobStage.PROCESS], "process-worker")
+        store.complete_stage(child.id, next_stage=None)
+        store.claim_next([JobStage.DOWNLOAD], "download-worker")
+        store.fail_stage("root", "old fanout failure", retry_delay_seconds=0)
+        store.claim_next([JobStage.DOWNLOAD], "download-worker")
+        store.fail_stage("root", "old fanout failure", retry_delay_seconds=0)
+        store.claim_next([JobStage.DOWNLOAD], "download-worker")
+        failed = store.fail_stage("root", "old fanout failure", retry_delay_seconds=0)
+        assert failed.status == JobStatus.FAILED
+
+        reconciled = store.reconcile_failed_fanout_parent("root")
+
+        assert reconciled is not None
+        assert reconciled.status == JobStatus.COMPLETED
+        assert reconciled.error is None
+        assert reconciled.artifacts["fanout_reconciled"]["completed_children"] == 1
+
+
+def test_reconcile_failed_fanout_parent_waits_for_active_children():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-0:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        store.claim_next([JobStage.DOWNLOAD], "download-worker")
+        store.fail_stage("root", "old fanout failure", retry_delay_seconds=0)
+        store.claim_next([JobStage.DOWNLOAD], "download-worker")
+        store.fail_stage("root", "old fanout failure", retry_delay_seconds=0)
+        store.claim_next([JobStage.DOWNLOAD], "download-worker")
+        failed = store.fail_stage("root", "old fanout failure", retry_delay_seconds=0)
+
+        reconciled = store.reconcile_failed_fanout_parent("root")
+
+        assert failed.status == JobStatus.FAILED
+        assert reconciled is not None
+        assert reconciled.status == JobStatus.FAILED
 
 
 def test_continuation_is_inserted_directly_at_process_stage():

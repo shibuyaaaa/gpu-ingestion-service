@@ -4,12 +4,50 @@ from pathlib import Path
 
 from app.config import Settings
 from app.jobs import build_default_registry
+from app.jobs.adapters import BulkDissectAdapter, _should_skip_segment_processing
 from app.jobs.context import JobContext
+from app.library_membership import LibraryMembershipChecker
+from app.library_writer import LibraryWriter
 from app.legacy.db import DBClient
+from app.legacy.utils.source import _yt_dlp_js_args
 from app.legacy.utils import GCSClient
 from app.models import ModelRuntimeBundle
 from app.queue import JobStatus, JobStore, JobType
 from app.workers import WorkerManager
+
+
+def test_segment_normalization_skips_short_boundary_segments():
+    segments = BulkDissectAdapter._normalize_segments(
+        {
+            "duration": 60.0,
+            "segments": [
+                {"label": "start", "start": 0.0, "end": 0.83},
+                {"label": "verse", "start": 0.83, "end": 18.0},
+                {"label": "end", "start": 58.7, "end": 60.0},
+            ],
+        }
+    )
+
+    assert segments == [{"id": "seg-1", "start": 0.83, "end": 18.0, "label": "verse"}]
+
+
+def test_existing_tiny_fanout_segments_are_skipped():
+    assert _should_skip_segment_processing({"label": "start", "start": 0.0, "end": 0.83}) is True
+    assert _should_skip_segment_processing({"label": "verse", "start": 0.83, "end": 18.0}) is False
+
+
+def test_yt_dlp_js_runtime_enables_ejs_remote_component(monkeypatch):
+    def fake_which(binary: str) -> str | None:
+        return "/usr/local/bin/deno" if binary == "deno" else None
+
+    monkeypatch.setattr("app.legacy.utils.source.shutil.which", fake_which)
+
+    assert _yt_dlp_js_args() == [
+        "--js-runtimes",
+        "deno:/usr/local/bin/deno",
+        "--remote-components",
+        "ejs:github",
+    ]
 
 
 async def test_worker_completes_local_dry_run_job():
@@ -29,6 +67,8 @@ async def test_worker_completes_local_dry_run_job():
         )
         store = JobStore(settings.queue_db_path, max_depth=settings.max_total_queue_depth)
         models = ModelRuntimeBundle.from_settings(settings)
+        db = DBClient(database_url="")
+        library = LibraryMembershipChecker(db=db, settings=settings)
         context = JobContext(
             settings=settings,
             store=store,
@@ -38,7 +78,9 @@ async def test_worker_completes_local_dry_run_job():
                 bucket_name=settings.gcp_bucket_name,
                 cdn_base_url=settings.cdn_base_url,
             ),
-            db=DBClient(database_url=""),
+            db=db,
+            library=library,
+            library_writer=LibraryWriter(db=db, settings=settings, membership=library),
         )
         manager = WorkerManager(context=context, registry=build_default_registry())
         store.enqueue(
@@ -52,8 +94,7 @@ async def test_worker_completes_local_dry_run_job():
         await manager.start()
         try:
             for _ in range(80):
-                job = store.get("dry-run-1")
-                if job and job.status == "completed":
+                if store.stats()["active_depth"] == 0:
                     break
                 await asyncio.sleep(0.1)
         finally:
@@ -63,9 +104,18 @@ async def test_worker_completes_local_dry_run_job():
         assert job is not None
         assert job.status == JobStatus.COMPLETED
         assert job.artifacts["final_outputs"]["dry_run"] is True
-        assert sorted(job.artifacts["processed_segments"]) == ["seg-0", "seg-1", "seg-2"]
         assert "analysis" in job.artifacts
-        assert job.artifacts["final_outputs"]["processed_segment_ids"] == ["seg-0", "seg-1", "seg-2"]
+        assert job.artifacts["fanout"]["child_count"] == 3
+        assert store.child_summary("dry-run-1") == {"total": 6, "active": 0, "completed": 6, "failed": 0}
+        for segment_id in ("seg-0", "seg-1", "seg-2"):
+            chord = store.get(f"dry-run-1:bulk:{segment_id}:chord")
+            other = store.get(f"dry-run-1:bulk:{segment_id}:other")
+            assert chord is not None
+            assert other is not None
+            assert chord.status == JobStatus.COMPLETED
+            assert other.status == JobStatus.COMPLETED
+            assert chord.artifacts["final_outputs"]["chord_outputs"]
+            assert other.artifacts["final_outputs"]["stem_outputs"]
 
 
 async def test_quick_dissect_stems_only_chorus_segment():
@@ -85,6 +135,8 @@ async def test_quick_dissect_stems_only_chorus_segment():
         )
         store = JobStore(settings.queue_db_path, max_depth=settings.max_total_queue_depth)
         models = ModelRuntimeBundle.from_settings(settings)
+        db = DBClient(database_url="")
+        library = LibraryMembershipChecker(db=db, settings=settings)
         context = JobContext(
             settings=settings,
             store=store,
@@ -94,7 +146,9 @@ async def test_quick_dissect_stems_only_chorus_segment():
                 bucket_name=settings.gcp_bucket_name,
                 cdn_base_url=settings.cdn_base_url,
             ),
-            db=DBClient(database_url=""),
+            db=db,
+            library=library,
+            library_writer=LibraryWriter(db=db, settings=settings, membership=library),
         )
         manager = WorkerManager(context=context, registry=build_default_registry())
         store.enqueue(
@@ -108,8 +162,7 @@ async def test_quick_dissect_stems_only_chorus_segment():
         await manager.start()
         try:
             for _ in range(80):
-                job = store.get("quick-1")
-                if job and job.status == "completed":
+                if store.stats()["active_depth"] == 0:
                     break
                 await asyncio.sleep(0.1)
         finally:
@@ -119,11 +172,24 @@ async def test_quick_dissect_stems_only_chorus_segment():
         assert job is not None
         assert job.status == JobStatus.COMPLETED
         assert "analysis" in job.artifacts
-        assert "quick_chorus_result" in job.artifacts
-        assert job.artifacts["final_outputs"]["quick_dissect"] is True
-        continuation_id = job.artifacts["bulk_continuation_job_id"]
-        continuation = store.get(continuation_id)
-        assert continuation is not None
-        assert continuation.job_type == JobType.BULK_DISSECT
-        assert continuation.payload["parent_job_id"] == "quick-1"
-        assert continuation.artifacts["skip_segment_ids"] == [job.artifacts["chorus_segment"]["id"]]
+        assert job.artifacts["final_outputs"]["status"] == "process_fanout_enqueued"
+
+        chorus_id = job.artifacts["chorus_segment"]["id"]
+        quick_chord = store.get(f"quick-1:quick:{chorus_id}:chord")
+        quick_other = store.get(f"quick-1:quick:{chorus_id}:other")
+        assert quick_chord is not None
+        assert quick_other is not None
+        assert quick_chord.job_type == JobType.QUICK_DISSECT
+        assert quick_chord.priority == 400
+        assert quick_chord.artifacts["final_outputs"]["quick_dissect_confirmation"] is True
+        assert quick_other.priority == 200
+
+        for segment_id in ("seg-0", "seg-1"):
+            bulk_chord = store.get(f"quick-1:bulk:{segment_id}:chord")
+            bulk_other = store.get(f"quick-1:bulk:{segment_id}:other")
+            assert bulk_chord is not None
+            assert bulk_other is not None
+            assert bulk_chord.job_type == JobType.BULK_DISSECT
+            assert bulk_chord.priority == 300
+            assert bulk_other.priority == 100
+        assert store.child_summary("quick-1") == {"total": 6, "active": 0, "completed": 6, "failed": 0}

@@ -28,6 +28,7 @@ if [ ! -f /etc/gpu-ingestion.env ]; then
 SERVICE_NAME=gpu-ingestion-service
 QUEUE_DB_PATH=/var/lib/gpu-ingestion/queue.sqlite3
 WORK_DIR=/var/lib/gpu-ingestion/tmp
+INGESTION_CPUSET=0-2
 START_WORKERS=true
 DRY_RUN_MODE=false
 MODEL_BACKEND=local
@@ -46,7 +47,7 @@ PINNED_AUDIO_SAMPLE_RATE=44100
 PINNED_AUDIO_SLOTS=2
 CUDA_GRAPHS_ENABLED=false
 CUDA_GRAPH_AUDIO_SECONDS=30
-MAX_TOTAL_QUEUE_DEPTH=200
+MAX_TOTAL_QUEUE_DEPTH=1000
 DOWNLOAD_WORKERS=4
 DOWNLOAD_BATCH_SIZE=2
 PROCESS_WORKERS=1
@@ -59,9 +60,21 @@ GCP_BUCKET_NAME=shibuya-assets
 CDN_BASE_URL=https://cdn.shibuyaaa.com
 SPOTIFY_CLIENT_ID=
 SPOTIFY_CLIENT_SECRET=
+CRAWLER_ENABLED=false
+CRAWLER_BATCH_SIZE=50
+CRAWLER_POLL_SECONDS=60
+CRAWLER_CPUSET=3
+CRAWLER_SPOTIFY_PLAYLIST_URLS=
+CRAWLER_KWORB_CHART_URLS=
+CRAWLER_INGESTION_URL=http://127.0.0.1:8080
+CRAWLER_SESSION_DB_PATH=/var/lib/gpu-ingestion/crawler.sqlite3
+CRAWLER_MAX_CANDIDATE_PAGES=10
+CRAWLER_OPS_BASE_URL=http://127.0.0.1:8080
 ENV
 fi
 
 sudo cp deploy/gpu-ingestion.service /etc/systemd/system/gpu-ingestion.service
+sudo cp deploy/gpu-ingestion-crawler.service /etc/systemd/system/gpu-ingestion-crawler.service
 sudo systemctl daemon-reload
 echo "Edit /etc/gpu-ingestion.env, then run: sudo systemctl enable --now gpu-ingestion"
+echo "For autonomous crawling, set CRAWLER_ENABLED=true and CRAWLER_KWORB_CHART_URLS, then run: sudo systemctl enable --now gpu-ingestion-crawler"

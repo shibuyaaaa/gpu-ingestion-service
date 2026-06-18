@@ -43,6 +43,12 @@ RUN python3.10 -m pip install --no-cache-dir \
     && python3.10 -m pip install --no-cache-dir --only-binary=:all: --trusted-host shi-labs.com \
       natten -f https://shi-labs.com/natten/wheels/cu118/torch2.0.0/index.html
 
+RUN curl -fsSL -o /tmp/deno.zip https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+    && python3.10 -m zipfile -e /tmp/deno.zip /usr/local/bin \
+    && chmod +x /usr/local/bin/deno \
+    && rm /tmp/deno.zip \
+    && deno --version
+
 WORKDIR ${APP_HOME}
 COPY requirements.txt .
 RUN python3.10 -m pip install --no-cache-dir -r requirements.txt
@@ -65,6 +71,13 @@ ENV PINNED_AUDIO_SAMPLE_RATE=44100
 ENV PINNED_AUDIO_SLOTS=2
 ENV CUDA_GRAPHS_ENABLED=false
 ENV CUDA_GRAPH_AUDIO_SECONDS=30
+ENV ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS=5
+ENV ALL_IN_ONE_DEMUCS_JOBS=0
+ENV DB_POOL_MIN_SIZE=1
+ENV DB_POOL_MAX_SIZE=5
+ENV LIBRARY_PRECHECK_ENABLED=true
+ENV LIBRARY_CACHE_IDLE_TTL_SECONDS=600
+ENV LIBRARY_CACHE_MAX_AGE_SECONDS=300
 
 EXPOSE 8080
 CMD ["python3.10", "-m", "uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", "8080"]

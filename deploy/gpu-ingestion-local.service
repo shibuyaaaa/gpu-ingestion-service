@@ -6,13 +6,16 @@ Requires=docker.service
 
 [Service]
 Type=simple
+Environment=INGESTION_CPUSET=0-2
 EnvironmentFile=/etc/gpu-ingestion.env
 TimeoutStartSec=1800
-ExecStartPre=/usr/bin/mkdir -p /var/lib/gpu-ingestion/tmp
+ExecStartPre=/usr/bin/mkdir -p /var/lib/gpu-ingestion/tmp /var/lib/gpu-ingestion/model-cache
 ExecStart=/usr/bin/docker run --rm --gpus all --name gpu-ingestion-service \
   --network host \
+  --cpuset-cpus=${INGESTION_CPUSET} \
   --env-file /etc/gpu-ingestion.env \
   -v /var/lib/gpu-ingestion:/var/lib/gpu-ingestion \
+  -v /var/lib/gpu-ingestion/model-cache:/root/.cache \
   gpu-ingestion-service:local
 ExecStop=/usr/bin/docker stop gpu-ingestion-service
 Restart=always

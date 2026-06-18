@@ -107,6 +107,10 @@ class WorkerManager:
                 next_stage=result.next_stage,
                 artifacts=result.artifacts,
             )
+            if job.stage == JobStage.PROCESS:
+                root_job_id = str(job.payload.get("root_job_id") or "")
+                if root_job_id and root_job_id != job.id:
+                    self.context.store.reconcile_failed_fanout_parent(root_job_id)
             state.processed += 1
             state.last_error = None
         except Exception as exc:

@@ -7,8 +7,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 
 from app.config import settings
+from app.crawler.store import CrawlerStore
 from app.jobs import UnsupportedJobType, build_default_registry
 from app.jobs.context import JobContext
+from app.library_membership import LibraryMembershipChecker
+from app.library_writer import LibraryWriter
 from app.legacy.db import DBClient
 from app.legacy.utils import GCSClient, parse_pubsub_envelope
 from app.models import ModelRuntimeBundle
@@ -26,20 +29,33 @@ gcs = GCSClient(
     bucket_name=settings.gcp_bucket_name,
     cdn_base_url=settings.cdn_base_url,
 )
-db = DBClient()
-context = JobContext(settings=settings, store=store, models=models, gcs=gcs, db=db)
+db = DBClient(min_size=settings.db_pool_min_size, max_size=settings.db_pool_max_size)
+library = LibraryMembershipChecker(db=db, settings=settings)
+library_writer = LibraryWriter(db=db, settings=settings, membership=library)
+context = JobContext(
+    settings=settings,
+    store=store,
+    models=models,
+    gcs=gcs,
+    db=db,
+    library=library,
+    library_writer=library_writer,
+)
 registry = build_default_registry()
 workers = WorkerManager(context=context, registry=registry)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not settings.dry_run_mode:
+        await library.warmup()
     if settings.start_workers:
         await workers.start()
     try:
         yield
     finally:
         await workers.stop()
+        await db.close()
 
 
 app = FastAPI(title="GPU Ingestion Service", lifespan=lifespan)
@@ -106,6 +122,8 @@ async def health() -> dict[str, Any]:
         "queue": queue_state,
         "workers": workers.state(),
         "external": external,
+        "library": library.status(),
+        "crawler": _crawler_status(),
         "models": model_state["models"],
         "gpu": model_state["gpu"],
     }
@@ -117,6 +135,8 @@ async def ops_state() -> dict[str, Any]:
         "queue": store.stats(),
         "workers": workers.state(),
         "models": models.status(),
+        "library": library.status(),
+        "crawler": _crawler_status(),
         "ingress": {"mode": "http", "queue": "sqlite"},
     }
 
@@ -168,6 +188,24 @@ async def get_job(job_id: str) -> dict[str, Any]:
     }
 
 
+@app.get("/ops/jobs/{job_id}/children-summary")
+async def get_job_children_summary(job_id: str) -> dict[str, Any]:
+    if store.get(job_id) is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return store.child_summary(job_id)
+
+
+@app.get("/ops/crawler/session/{session_id}")
+async def get_crawler_session(session_id: str) -> dict[str, Any]:
+    crawler_store = _crawler_store_if_available()
+    if crawler_store is None:
+        raise HTTPException(status_code=404, detail="crawler state is not available")
+    detail = crawler_store.session_detail(session_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="crawler session not found")
+    return detail
+
+
 @app.get("/ops/gpu")
 async def ops_gpu() -> dict[str, Any]:
     return models.status()
@@ -211,6 +249,30 @@ def _path_writable(path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _crawler_status() -> dict[str, Any]:
+    status = {
+        "enabled": settings.crawler_enabled,
+        "session_db_path": str(settings.crawler_session_db_path),
+        "available": False,
+    }
+    crawler_store = _crawler_store_if_available()
+    if crawler_store is None:
+        return status
+    try:
+        return {**status, "available": True, **crawler_store.status()}
+    except Exception as exc:
+        return {**status, "error": str(exc)[:1000]}
+
+
+def _crawler_store_if_available() -> CrawlerStore | None:
+    if not settings.crawler_session_db_path.exists():
+        return None
+    try:
+        return CrawlerStore(settings.crawler_session_db_path)
+    except Exception:
+        return None
 
 
 def _validate_supported_job(payload: dict[str, Any]) -> None:

@@ -9,8 +9,17 @@ import httpx
 from app.jobs.base import JobAdapter, StageResult
 from app.jobs.context import JobContext
 from app.legacy.audio import AudioOps
-from app.legacy.utils.source import resolve_and_download_spotify_source
+from app.legacy.utils.source import download_youtube_audio, resolve_source_metadata, resolve_youtube_match
 from app.queue import JobRecord, JobStage, JobType
+
+
+PROCESS_PRIORITY_QUICK_CHORD = 400
+PROCESS_PRIORITY_BULK_CHORD = 300
+PROCESS_PRIORITY_QUICK_OTHER = 200
+PROCESS_PRIORITY_BULK_OTHER = 100
+
+PROCESS_MODE_SEGMENT_CHORD = "segment_chord"
+PROCESS_MODE_SEGMENT_OTHER = "segment_other"
 
 
 class DissectAdapter(JobAdapter):
@@ -32,8 +41,30 @@ class DissectAdapter(JobAdapter):
                 "audio_path": str(source_path),
             }
         else:
-            resolved = await resolve_and_download_spotify_source(source, work_dir)
-            source_path = Path(resolved["audio_path"])
+            resolved = await resolve_source_metadata(source)
+            library_result = await context.library.lookup(resolved.get("spotify_metadata"))
+            if library_result.exists:
+                return StageResult(
+                    next_stage=None,
+                    artifacts={
+                        "source": source,
+                        "youtube_url": resolved.get("youtube_url"),
+                        "spotify_metadata": resolved.get("spotify_metadata"),
+                        "youtube_match": resolved.get("youtube_match"),
+                        "library_precheck": library_result.to_dict(),
+                        "final_outputs": {
+                            "job_type": job.job_type.value,
+                            "source": source,
+                            "status": "skipped_existing_library_song",
+                            "library_song": library_result.song.to_dict() if library_result.song else None,
+                            "library_precheck_source": library_result.source,
+                            "dry_run": context.settings.dry_run_mode,
+                        },
+                    },
+                )
+            resolved = await resolve_youtube_match(resolved)
+            audio_path = await download_youtube_audio(resolved["youtube_url"], work_dir)
+            source_path = Path(audio_path)
 
         wav_path = work_dir / "input.wav"
         if source_path.suffix.lower() in {".wav", ".wave"}:
@@ -52,6 +83,7 @@ class DissectAdapter(JobAdapter):
                 "youtube_url": resolved.get("youtube_url"),
                 "spotify_metadata": resolved.get("spotify_metadata"),
                 "youtube_match": resolved.get("youtube_match"),
+                "library_precheck": library_result.to_dict() if not context.settings.dry_run_mode else None,
             },
         )
 
@@ -73,23 +105,124 @@ class DissectAdapter(JobAdapter):
         full_stem_paths = {}
         if full_stem_urls and not context.settings.dry_run_mode:
             full_stem_paths = await self._download_full_stems(full_stem_urls, Path(job.artifacts["work_dir"]))
+        artifacts = {
+            "analysis": analysis,
+            "analyzer_result_path": result.get("analyzer_result_path"),
+            "analyzer_result_url": result.get("analyzer_result_url"),
+            "full_stem_urls": full_stem_urls,
+            "full_stem_paths": full_stem_paths,
+            "segments": segments,
+            "chorus_segment": chorus_segment,
+            "skip_segment_ids": job.artifacts.get("skip_segment_ids", []),
+        }
+        fanout = self._enqueue_analyzed_process_jobs(job, context, artifacts)
         return StageResult(
-            next_stage=JobStage.PROCESS,
+            next_stage=None,
             artifacts={
-                "analysis": analysis,
-                "analyzer_result_path": result.get("analyzer_result_path"),
-                "analyzer_result_url": result.get("analyzer_result_url"),
-                "full_stem_urls": full_stem_urls,
-                "full_stem_paths": full_stem_paths,
-                "segments": segments,
-                "chorus_segment": chorus_segment,
-                "processed_segments": {},
-                "skip_segment_ids": job.artifacts.get("skip_segment_ids", []),
+                **artifacts,
+                "fanout": fanout,
+                "final_outputs": {
+                    "job_type": job.job_type.value,
+                    "source": job.artifacts.get("source"),
+                    "status": "process_fanout_enqueued",
+                    "fanout": fanout,
+                    "dry_run": context.settings.dry_run_mode,
+                },
             },
         )
 
     async def process(self, job: JobRecord, context: JobContext) -> StageResult:
         raise NotImplementedError
+
+    def _enqueue_analyzed_process_jobs(
+        self,
+        job: JobRecord,
+        context: JobContext,
+        artifacts: dict[str, Any],
+    ) -> dict[str, Any]:
+        segments = artifacts.get("segments") or []
+        chorus_segment = artifacts.get("chorus_segment") or {}
+        chorus_segment_id = str(chorus_segment.get("id") or "")
+        skipped = {str(segment_id) for segment_id in artifacts.get("skip_segment_ids", [])}
+        root_job_id = str(job.payload.get("root_job_id") or job.id)
+        children = []
+
+        for segment in segments:
+            segment_id = str(segment["id"])
+            if segment_id in skipped:
+                continue
+            is_quick_chorus = job.job_type == JobType.QUICK_DISSECT and segment_id == chorus_segment_id
+            child_job_type = JobType.QUICK_DISSECT if is_quick_chorus else JobType.BULK_DISSECT
+            process_group = "quick" if is_quick_chorus else "bulk"
+            priority = PROCESS_PRIORITY_QUICK_CHORD if is_quick_chorus else PROCESS_PRIORITY_BULK_CHORD
+            child_id = f"{root_job_id}:{process_group}:{_safe_job_part(segment_id)}:chord"
+            child = context.store.enqueue_process_child(
+                parent_job=job,
+                child_id=child_id,
+                job_type=child_job_type,
+                priority=priority,
+                payload={
+                    "source": job.artifacts.get("source") or job.payload.get("source"),
+                    "root_job_id": root_job_id,
+                    "process_mode": PROCESS_MODE_SEGMENT_CHORD,
+                    "process_group": process_group,
+                    "segment_id": segment_id,
+                },
+                artifacts={
+                    **self._base_process_artifacts(job, artifacts),
+                    "process_mode": PROCESS_MODE_SEGMENT_CHORD,
+                    "process_group": process_group,
+                    "root_job_id": root_job_id,
+                    "parent_job_id": job.id,
+                    "segment_id": segment_id,
+                    "segment": segment,
+                    "other_stems_priority": (
+                        PROCESS_PRIORITY_QUICK_OTHER if is_quick_chorus else PROCESS_PRIORITY_BULK_OTHER
+                    ),
+                },
+            )
+            children.append(
+                {
+                    "job_id": child.id,
+                    "segment_id": segment_id,
+                    "process_group": process_group,
+                    "process_mode": PROCESS_MODE_SEGMENT_CHORD,
+                    "priority": child.priority,
+                }
+            )
+
+        return {
+            "root_job_id": root_job_id,
+            "strategy": "segment_chord_jobs_enqueue_other_stem_jobs",
+            "children": children,
+            "child_count": len(children),
+            "priority_order": [
+                {"name": "quick_chord", "priority": PROCESS_PRIORITY_QUICK_CHORD},
+                {"name": "bulk_chord", "priority": PROCESS_PRIORITY_BULK_CHORD},
+                {"name": "quick_other", "priority": PROCESS_PRIORITY_QUICK_OTHER},
+                {"name": "bulk_other", "priority": PROCESS_PRIORITY_BULK_OTHER},
+            ],
+        }
+
+    @staticmethod
+    def _base_process_artifacts(job: JobRecord, artifacts: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "work_dir": job.artifacts["work_dir"],
+            "source": job.artifacts.get("source"),
+            "source_path": job.artifacts.get("source_path"),
+            "audio_path": job.artifacts["audio_path"],
+            "youtube_url": job.artifacts.get("youtube_url"),
+            "spotify_metadata": job.artifacts.get("spotify_metadata"),
+            "youtube_match": job.artifacts.get("youtube_match"),
+            "analysis": artifacts.get("analysis", {}),
+            "analyzer_result_path": artifacts.get("analyzer_result_path"),
+            "analyzer_result_url": artifacts.get("analyzer_result_url"),
+            "full_stem_urls": artifacts.get("full_stem_urls", {}),
+            "full_stem_paths": artifacts.get("full_stem_paths", {}),
+            "segments": artifacts.get("segments", []),
+            "chorus_segment": artifacts.get("chorus_segment"),
+            "skip_segment_ids": artifacts.get("skip_segment_ids", []),
+        }
 
     async def _process_segment(
         self,
@@ -98,13 +231,17 @@ class DissectAdapter(JobAdapter):
         segment: dict[str, Any],
         *,
         output_prefix: str,
+        stem_group: str = "all",
     ) -> dict[str, Any]:
         work_dir = Path(job.artifacts["work_dir"])
         segment_id = str(segment["id"])
         segment_dir = work_dir / output_prefix / segment_id
         segment_dir.mkdir(parents=True, exist_ok=True)
-        segment_path = segment_dir / "input.mp3"
-        if context.settings.dry_run_mode:
+        existing_segment_path = job.artifacts.get("segment_path")
+        segment_path = Path(existing_segment_path) if existing_segment_path else segment_dir / "input.mp3"
+        if existing_segment_path and segment_path.exists():
+            pass
+        elif context.settings.dry_run_mode:
             shutil.copyfile(job.artifacts["audio_path"], segment_path)
         else:
             await AudioOps.extract_segment(
@@ -115,24 +252,32 @@ class DissectAdapter(JobAdapter):
             )
 
         stems_dir = segment_dir / "stems"
-        full_stem_paths = job.artifacts.get("full_stem_paths") or {}
-        if full_stem_paths and not context.settings.dry_run_mode:
-            stems = await self._extract_stem_segments(full_stem_paths, stems_dir, segment)
+        existing_stem_paths = job.artifacts.get("stem_paths") or {}
+        if existing_stem_paths:
+            stems = dict(existing_stem_paths)
         else:
-            async with context.models.gpu_lock:
-                context.models.active_gpu_job_id = job.id
-                context.models.active_gpu_model = "htdemucs"
-                try:
-                    stems = await context.models.htdemucs.separate(segment_path, stems_dir)
-                finally:
-                    context.models.active_gpu_job_id = None
-                    context.models.active_gpu_model = None
+            full_stem_paths = job.artifacts.get("full_stem_paths") or {}
+            if full_stem_paths and not context.settings.dry_run_mode:
+                stems = await self._extract_stem_segments(full_stem_paths, stems_dir, segment)
+            else:
+                async with context.models.gpu_lock:
+                    context.models.active_gpu_job_id = job.id
+                    context.models.active_gpu_model = "htdemucs"
+                    try:
+                        stems = await context.models.htdemucs.separate(segment_path, stems_dir)
+                    finally:
+                        context.models.active_gpu_job_id = None
+                        context.models.active_gpu_model = None
+
+        selected_stems = dict(_filter_stems(stems, stem_group))
 
         if context.settings.dry_run_mode:
-            uploaded = {stem: path for stem, path in stems.items()}
+            uploaded = {stem: path for stem, path in selected_stems.items()}
         else:
             uploaded = {}
-            for stem, path in stems.items():
+            chord_published = False
+            early_library_publish = None
+            for stem, path in _ordered_upload_stems(selected_stems):
                 local_path = Path(path)
                 if local_path.suffix.lower() != ".mp3":
                     mp3_path = local_path.with_suffix(".mp3")
@@ -140,13 +285,180 @@ class DissectAdapter(JobAdapter):
                     local_path = mp3_path
                 gcs_path = f"gpu-ingestion/{job.id}/segments/{segment_id}/{stem}.mp3"
                 uploaded[stem] = await context.gcs.upload(local_path, gcs_path, content_type="audio/mpeg")
+                if not chord_published and _canonical_stem_type(stem) == "chord":
+                    chord_result = {
+                        "segment": segment,
+                        "segment_path": str(segment_path),
+                        "stem_paths": stems,
+                        "outputs": dict(uploaded),
+                    }
+                    chord_publish = await context.library_writer.publish_segment(
+                        job=job,
+                        segment=segment,
+                        segment_result=chord_result,
+                        status="partial",
+                    )
+                    early_library_publish = chord_publish.to_dict()
+                    chord_published = True
 
         return {
             "segment": segment,
             "segment_path": str(segment_path),
             "stem_paths": stems,
             "outputs": uploaded,
+            "early_library_publish": early_library_publish if not context.settings.dry_run_mode else None,
         }
+
+    async def _process_fanout_job(self, job: JobRecord, context: JobContext) -> StageResult:
+        process_mode = job.artifacts.get("process_mode")
+        segment = job.artifacts.get("segment")
+        if not segment:
+            raise RuntimeError("fanout process job is missing segment metadata")
+
+        process_group = str(job.artifacts.get("process_group") or "bulk")
+        output_prefix = f"{process_group}_segments"
+        if _should_skip_segment_processing(segment):
+            final_outputs = {
+                "job_type": job.job_type.value,
+                "source": job.artifacts.get("source"),
+                "process_mode": process_mode,
+                "process_group": process_group,
+                "segment_id": str(segment["id"]),
+                "status": "skipped_tiny_or_boundary_segment",
+                "dry_run": context.settings.dry_run_mode,
+            }
+            return StageResult(next_stage=None, artifacts={"final_outputs": final_outputs})
+
+        if process_mode == PROCESS_MODE_SEGMENT_CHORD:
+            result = await self._process_segment(
+                job,
+                context,
+                segment,
+                output_prefix=output_prefix,
+                stem_group="chord",
+            )
+            other_job = self._enqueue_other_stems_job(job, context, segment, result)
+            library_complete = None
+            if other_job is None and not context.settings.dry_run_mode:
+                root_job_id = str(job.artifacts.get("root_job_id") or job.payload.get("root_job_id") or job.id)
+                sibling_summary = context.store.child_summary(root_job_id, exclude_job_id=job.id)
+                if sibling_summary["active"] == 0 and sibling_summary["failed"] == 0:
+                    library_complete = (await context.library_writer.mark_complete(job=job)).to_dict()
+            final_outputs = {
+                "job_type": job.job_type.value,
+                "source": job.artifacts.get("source"),
+                "process_mode": process_mode,
+                "process_group": process_group,
+                "segment_id": str(segment["id"]),
+                "chord_outputs": result.get("outputs", {}),
+                "other_stems_job_id": other_job.id if other_job else None,
+                "quick_dissect_confirmation": process_group == "quick",
+                "library_complete": library_complete,
+                "dry_run": context.settings.dry_run_mode,
+            }
+            return StageResult(
+                next_stage=None,
+                artifacts={
+                    "segment_result": result,
+                    "other_stems_job_id": other_job.id if other_job else None,
+                    "library_complete": library_complete,
+                    "final_outputs": final_outputs,
+                },
+            )
+
+        if process_mode == PROCESS_MODE_SEGMENT_OTHER:
+            result = await self._process_segment(
+                job,
+                context,
+                segment,
+                output_prefix=output_prefix,
+                stem_group="other",
+            )
+            library_publish = None
+            library_complete = None
+            if not context.settings.dry_run_mode:
+                library_publish = (
+                    await context.library_writer.publish_segment(
+                        job=job,
+                        segment=segment,
+                        segment_result=result,
+                        status="partial",
+                    )
+                ).to_dict()
+                result["library_publish"] = library_publish
+                root_job_id = str(job.artifacts.get("root_job_id") or job.payload.get("root_job_id") or job.id)
+                sibling_summary = context.store.child_summary(root_job_id, exclude_job_id=job.id)
+                if sibling_summary["active"] == 0 and sibling_summary["failed"] == 0:
+                    library_complete = (await context.library_writer.mark_complete(job=job)).to_dict()
+
+            final_outputs = {
+                "job_type": job.job_type.value,
+                "source": job.artifacts.get("source"),
+                "process_mode": process_mode,
+                "process_group": process_group,
+                "segment_id": str(segment["id"]),
+                "stem_outputs": result.get("outputs", {}),
+                "library_publish": library_publish,
+                "library_complete": library_complete,
+                "dry_run": context.settings.dry_run_mode,
+            }
+            return StageResult(
+                next_stage=None,
+                artifacts={
+                    "segment_result": result,
+                    "library_publish": library_publish,
+                    "library_complete": library_complete,
+                    "final_outputs": final_outputs,
+                },
+            )
+
+        raise RuntimeError(f"unknown process_mode for fanout job: {process_mode}")
+
+    def _enqueue_other_stems_job(
+        self,
+        job: JobRecord,
+        context: JobContext,
+        segment: dict[str, Any],
+        chord_result: dict[str, Any],
+    ) -> JobRecord | None:
+        other_stems = dict(_filter_stems(chord_result.get("stem_paths") or {}, "other"))
+        if not other_stems:
+            return None
+
+        root_job_id = str(job.artifacts.get("root_job_id") or job.payload.get("root_job_id") or job.id)
+        process_group = str(job.artifacts.get("process_group") or "bulk")
+        priority = int(
+            job.artifacts.get(
+                "other_stems_priority",
+                PROCESS_PRIORITY_QUICK_OTHER if process_group == "quick" else PROCESS_PRIORITY_BULK_OTHER,
+            )
+        )
+        child_id = f"{root_job_id}:{process_group}:{_safe_job_part(str(segment['id']))}:other"
+        return context.store.enqueue_process_child(
+            parent_job=job,
+            child_id=child_id,
+            job_type=job.job_type,
+            priority=priority,
+            payload={
+                "source": job.artifacts.get("source") or job.payload.get("source"),
+                "root_job_id": root_job_id,
+                "process_mode": PROCESS_MODE_SEGMENT_OTHER,
+                "process_group": process_group,
+                "segment_id": str(segment["id"]),
+            },
+            artifacts={
+                **self._base_process_artifacts(job, job.artifacts),
+                "process_mode": PROCESS_MODE_SEGMENT_OTHER,
+                "process_group": process_group,
+                "root_job_id": root_job_id,
+                "parent_job_id": job.id,
+                "segment_id": str(segment["id"]),
+                "segment": segment,
+                "segment_path": chord_result.get("segment_path"),
+                "stem_paths": chord_result.get("stem_paths") or {},
+                "chord_outputs": chord_result.get("outputs") or {},
+            },
+        )
 
     @staticmethod
     async def _download_full_stems(stem_urls: dict[str, str], work_dir: Path) -> dict[str, str]:
@@ -213,6 +525,14 @@ class DissectAdapter(JobAdapter):
                     "label": str(segment.get("label") or f"segment-{index}"),
                 }
             )
+        meaningful = [
+            segment
+            for segment in normalized
+            if (float(segment["end"]) - float(segment["start"])) >= 5.0
+            and segment["label"].lower() not in {"start", "end", "silence"}
+        ]
+        if meaningful:
+            return meaningful
         if normalized:
             return normalized
         return [{"id": "seg-0", "start": 0.0, "end": min(duration, 30.0), "label": "segment"}]
@@ -239,6 +559,9 @@ class BulkDissectAdapter(DissectAdapter):
     job_types = {JobType.BULK_DISSECT.value}
 
     async def process(self, job: JobRecord, context: JobContext) -> StageResult:
+        if job.artifacts.get("process_mode"):
+            return await self._process_fanout_job(job, context)
+
         segments = job.artifacts.get("segments") or []
         processed = dict(job.artifacts.get("processed_segments") or {})
         skipped = set(job.artifacts.get("skip_segment_ids") or [])
@@ -251,12 +574,18 @@ class BulkDissectAdapter(DissectAdapter):
                 break
 
         if next_segment is None:
+            library_publish = None
+            if not context.settings.dry_run_mode:
+                library_publish = (
+                    await context.library_writer.mark_complete(job=job)
+                ).to_dict()
             final_outputs = {
                 "job_type": job.job_type.value,
                 "source": job.artifacts.get("source"),
                 "processed_segment_ids": sorted(processed),
                 "skipped_segment_ids": sorted(skipped),
                 "dry_run": context.settings.dry_run_mode,
+                "library_publish": library_publish,
             }
             result_url = None
             if not context.settings.dry_run_mode:
@@ -271,23 +600,36 @@ class BulkDissectAdapter(DissectAdapter):
             return StageResult(next_stage=None, artifacts={"final_outputs": final_outputs, "result_url": result_url})
 
         result = await self._process_segment(job, context, next_segment, output_prefix="bulk_segments")
-        processed[str(next_segment["id"])] = result
+        next_processed = {**processed, str(next_segment["id"]): result}
         remaining = [
             segment
             for segment in segments
-            if str(segment["id"]) not in processed and str(segment["id"]) not in skipped
+            if str(segment["id"]) not in next_processed and str(segment["id"]) not in skipped
         ]
+        library_publish = None
+        if not context.settings.dry_run_mode:
+            library_publish = (
+                await context.library_writer.publish_segment(
+                    job=job,
+                    segment=next_segment,
+                    segment_result=result,
+                    status="partial" if remaining else "complete",
+                )
+            ).to_dict()
+            result["library_publish"] = library_publish
         return StageResult(
             next_stage=JobStage.PROCESS if remaining else None,
             artifacts={
-                "processed_segments": processed,
+                "processed_segments": next_processed,
                 "last_processed_segment_id": str(next_segment["id"]),
+                "library_publish": library_publish,
                 "final_outputs": {
                     "job_type": job.job_type.value,
                     "source": job.artifacts.get("source"),
-                    "processed_segment_ids": sorted(processed),
+                    "processed_segment_ids": sorted(next_processed),
                     "skipped_segment_ids": sorted(skipped),
                     "dry_run": context.settings.dry_run_mode,
+                    "library_publish": library_publish,
                 },
             },
         )
@@ -297,11 +639,25 @@ class QuickDissectAdapter(DissectAdapter):
     job_types = {JobType.QUICK_DISSECT.value}
 
     async def process(self, job: JobRecord, context: JobContext) -> StageResult:
+        if job.artifacts.get("process_mode"):
+            return await self._process_fanout_job(job, context)
+
         chorus_segment = job.artifacts.get("chorus_segment")
         if not chorus_segment:
             raise RuntimeError("quick_dissect job is missing chorus_segment")
 
         chorus_result = await self._process_segment(job, context, chorus_segment, output_prefix="quick_chorus")
+        library_publish = None
+        if not context.settings.dry_run_mode:
+            library_publish = (
+                await context.library_writer.publish_segment(
+                    job=job,
+                    segment=chorus_segment,
+                    segment_result=chorus_result,
+                    status="partial",
+                )
+            ).to_dict()
+            chorus_result["library_publish"] = library_publish
         continuation = context.store.enqueue_continuation(
             parent_job=job,
             payload={
@@ -338,6 +694,7 @@ class QuickDissectAdapter(DissectAdapter):
             "chorus_outputs": chorus_result.get("outputs", {}),
             "dry_run": context.settings.dry_run_mode,
             "bulk_continuation_job_id": continuation.id,
+            "library_publish": library_publish,
         }
         return StageResult(
             next_stage=None,
@@ -346,6 +703,49 @@ class QuickDissectAdapter(DissectAdapter):
                 "processed_segments": {str(chorus_segment["id"]): chorus_result},
                 "skip_segment_ids": [str(chorus_segment["id"])],
                 "bulk_continuation_job_id": continuation.id,
+                "library_publish": library_publish,
                 "final_outputs": final_outputs,
             },
         )
+
+
+def _canonical_stem_type(stem: str) -> str:
+    mapping = {
+        "vocals": "voice",
+        "vocal": "voice",
+        "voice": "voice",
+        "drums": "beat",
+        "drum": "beat",
+        "beat": "beat",
+        "bass": "bass",
+        "other": "chord",
+        "chords": "chord",
+        "chord": "chord",
+        "instrumental": "chord",
+    }
+    return mapping.get(stem.strip().lower(), stem.strip().lower())
+
+
+def _ordered_upload_stems(stems: dict[str, str]) -> list[tuple[str, str]]:
+    priority = {"chord": 0, "beat": 1, "bass": 2, "voice": 3}
+    return sorted(stems.items(), key=lambda item: priority.get(_canonical_stem_type(item[0]), 99))
+
+
+def _filter_stems(stems: dict[str, str], stem_group: str) -> list[tuple[str, str]]:
+    if stem_group == "all":
+        return list(stems.items())
+    if stem_group == "chord":
+        return [(stem, path) for stem, path in stems.items() if _canonical_stem_type(stem) == "chord"]
+    if stem_group == "other":
+        return [(stem, path) for stem, path in stems.items() if _canonical_stem_type(stem) != "chord"]
+    raise ValueError(f"unknown stem group: {stem_group}")
+
+
+def _safe_job_part(value: str) -> str:
+    return "".join(character if character.isalnum() or character in {"-", "_"} else "-" for character in value)
+
+
+def _should_skip_segment_processing(segment: dict[str, Any]) -> bool:
+    label = str(segment.get("label") or "").lower()
+    duration = float(segment.get("end") or 0.0) - float(segment.get("start") or 0.0)
+    return label in {"start", "end", "silence"} or duration < 5.0

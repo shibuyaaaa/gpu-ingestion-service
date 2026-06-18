@@ -9,7 +9,7 @@ services:
       WORK_DIR: /var/lib/gpu-ingestion/tmp
       START_WORKERS: "true"
       DRY_RUN_MODE: "true"
-      MAX_TOTAL_QUEUE_DEPTH: "200"
+      MAX_TOTAL_QUEUE_DEPTH: "1000"
       DOWNLOAD_WORKERS: "2"
       DOWNLOAD_BATCH_SIZE: "2"
       ANALYZE_BATCH_SIZE: "1"

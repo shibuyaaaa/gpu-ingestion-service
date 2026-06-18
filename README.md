@@ -10,7 +10,7 @@ ops visibility.
 ## Runtime Shape
 
 ```text
-Pub/Sub push or direct HTTP job
+local HTTP job
   -> FastAPI
   -> SQLite/WAL durable local queue
   -> download workers
@@ -22,9 +22,10 @@ Pub/Sub push or direct HTTP job
   -> GCS + DB updates
 ```
 
-`POST /pubsub` is the production-compatible ingress path. `POST /jobs` exists
-for manual testing and local replay. Once a request is committed to SQLite, the
-local worker scheduler owns the job lifecycle.
+`POST /jobs` is the VM-local ingress path used by the crawler and manual
+replay. `POST /pubsub` remains available only as a compatibility receiver for
+legacy/shadow traffic. Once a request is committed to SQLite, the local worker
+scheduler owns the job lifecycle.
 
 The only canonical job types are:
 
@@ -59,7 +60,7 @@ run with `DRY_RUN_MODE=false`.
 
 - `QUEUE_DB_PATH`: SQLite queue path. Default: `data/queue.sqlite3`.
 - `WORK_DIR`: local temp/artifact working directory. Default: `tmp`.
-- `MAX_TOTAL_QUEUE_DEPTH`: backpressure limit. Default: `200`.
+- `MAX_TOTAL_QUEUE_DEPTH`: backpressure limit. Default: `1000` for crawler fanout.
 - `DOWNLOAD_WORKERS`, `DOWNLOAD_BATCH_SIZE`: local source/download workers.
 - `ANALYZE_BATCH_SIZE`: analyze-stage jobs per GPU loop. Default: `1` for one L4.
 - `PROCESS_WORKERS`, `PROCESS_BATCH_SIZE`: process-stage segment workers.
@@ -68,17 +69,20 @@ run with `DRY_RUN_MODE=false`.
 - `ALL_IN_ONE_GCP_URL`: Cloud Run all-in-one `/predict` service URL for remote GPU mode.
 - `ALL_IN_ONE_AUTH`: `none`, `api_key`, `google_id_token`, or `gcloud_identity_token`.
 - `ALL_IN_ONE_TIMEOUT_SECONDS`: remote GPU request timeout. Default: `1800`.
+- `ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS`: memory-bounded Demucs segment size used inside all-in-one analysis. Default: `5`.
+- `ALL_IN_ONE_DEMUCS_JOBS`: Demucs worker count used inside all-in-one analysis. Default: `0`.
 - `DRY_RUN_MODE`: test/dev mode. Default: `false`.
 - `GCP_PROJECT_ID`, `GCP_BUCKET_NAME`, `CDN_BASE_URL`: GCP output config.
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`: required for Spotify link/name resolution.
+- `CRAWLER_INGESTION_URL`: VM-local ingestion API URL. Default: `http://127.0.0.1:8080`.
 - `GPU_DEVICE`: CUDA device string. Default: `cuda:0`.
 
 ## Queue Choice
 
 The first production target is one GPU VM, so the service uses SQLite/WAL as the
-single local durable queue and job state table. Pub/Sub retries cover delivery
-while the service is down. After the service accepts a request, SQLite tracks
-stage, status, retries, artifacts, events, and ops visibility.
+single local durable queue and job state table. The crawler submits to the local
+FastAPI service on the same VM; after the service accepts a request, SQLite
+tracks stage, status, retries, artifacts, events, and ops visibility.
 
 Workers claim queued jobs by priority first, then FIFO within the same priority.
 Explicit payload `priority` wins. If omitted, job-type defaults are applied:
