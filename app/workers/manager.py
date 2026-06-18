@@ -157,6 +157,8 @@ class WorkerManager:
             removed_bytes = 0
             for work_dir in work_dirs:
                 path = Path(work_dir)
+                if not path.exists():
+                    continue
                 if not self._cleanup_path_allowed(path):
                     logger.warning("skipping cleanup outside work dir: %s", path)
                     continue
