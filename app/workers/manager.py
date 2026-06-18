@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import shutil
 import socket
 import time
@@ -57,6 +58,14 @@ class WorkerManager:
             "last_run_at": None,
             "last_error": None,
         }
+        self._gpu_health_state: dict[str, Any] = {
+            "enabled": context.settings.gpu_health_restart_enabled and not context.settings.dry_run_mode,
+            "checks": 0,
+            "consecutive_failures": 0,
+            "last_check_at": None,
+            "last_error": None,
+            "restart_threshold": context.settings.gpu_health_restart_failures,
+        }
 
     async def start(self) -> None:
         if self._tasks:
@@ -78,6 +87,8 @@ class WorkerManager:
             )
         if self.context.settings.work_dir_cleanup_enabled:
             self._tasks.append(asyncio.create_task(self._cleanup_loop(), name="work-dir-cleanup"))
+        if self._gpu_health_state["enabled"]:
+            self._tasks.append(asyncio.create_task(self._gpu_health_loop(), name="gpu-health"))
         logger.info("started %d local workers", len(self._tasks))
 
     async def stop(self) -> None:
@@ -175,6 +186,36 @@ class WorkerManager:
             logger.exception("work dir cleanup failed")
             self._cleanup_state["last_error"] = str(exc)
 
+    async def _gpu_health_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=max(5.0, self.context.settings.gpu_health_check_interval_seconds),
+                )
+                continue
+            except asyncio.TimeoutError:
+                pass
+            status = await asyncio.to_thread(self.context.models.status)
+            gpu = status.get("gpu", {})
+            self._gpu_health_state["checks"] += 1
+            self._gpu_health_state["last_check_at"] = time.time()
+            if gpu.get("available"):
+                self._gpu_health_state["consecutive_failures"] = 0
+                self._gpu_health_state["last_error"] = None
+                continue
+            self._gpu_health_state["consecutive_failures"] += 1
+            self._gpu_health_state["last_error"] = gpu.get("error") or "GPU unavailable"
+            logger.error(
+                "GPU health check failed %s/%s: %s",
+                self._gpu_health_state["consecutive_failures"],
+                self._gpu_health_state["restart_threshold"],
+                self._gpu_health_state["last_error"],
+            )
+            if self._gpu_health_state["consecutive_failures"] >= self._gpu_health_state["restart_threshold"]:
+                logger.critical("exiting process so systemd can refresh container GPU runtime")
+                os._exit(75)
+
     def _cleanup_path_allowed(self, path: Path) -> bool:
         try:
             resolved = path.resolve()
@@ -194,6 +235,7 @@ class WorkerManager:
                 "interval_seconds": self.context.settings.work_dir_cleanup_interval_seconds,
                 "min_age_seconds": self.context.settings.work_dir_cleanup_min_age_seconds,
             },
+            "gpu_health": self._gpu_health_state,
             "scheduling": {
                 "download_batch_size": self.context.settings.download_batch_size,
                 "analyze_batch_size": self.context.settings.analyze_batch_size,

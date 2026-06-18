@@ -73,6 +73,7 @@ run with `DRY_RUN_MODE=false`.
 - `ALL_IN_ONE_TIMEOUT_SECONDS`: remote GPU request timeout. Default: `1800`.
 - `ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS`: memory-bounded Demucs segment size used inside all-in-one analysis. Default: `5`.
 - `ALL_IN_ONE_DEMUCS_JOBS`: Demucs worker count used inside all-in-one analysis. Default: `0`.
+- `GPU_HEALTH_RESTART_*`: restart the service after repeated container GPU/NVML failures.
 - `DRY_RUN_MODE`: test/dev mode. Default: `false`.
 - `GCP_PROJECT_ID`, `GCP_BUCKET_NAME`, `CDN_BASE_URL`: GCP output config.
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`: required for Spotify link/name resolution.
