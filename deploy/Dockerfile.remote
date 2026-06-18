@@ -1,0 +1,44 @@
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV APP_HOME=/srv/gpu-ingestion-service
+ENV PYTHONPATH=/srv/gpu-ingestion-service
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR ${APP_HOME}
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir \
+      aiofiles \
+      asyncpg \
+      fastapi \
+      google-auth \
+      google-cloud-storage \
+      httpx \
+      python-dotenv \
+      python-multipart \
+      uvicorn[standard] \
+      yt-dlp
+
+COPY app ./app
+
+ENV QUEUE_DB_PATH=/var/lib/gpu-ingestion/queue.sqlite3
+ENV WORK_DIR=/var/lib/gpu-ingestion/tmp
+ENV MODEL_BACKEND=cloud_run_fallback
+ENV DRY_RUN_MODE=false
+ENV START_WORKERS=true
+ENV DB_POOL_MIN_SIZE=1
+ENV DB_POOL_MAX_SIZE=5
+ENV LIBRARY_PRECHECK_ENABLED=true
+ENV LIBRARY_CACHE_IDLE_TTL_SECONDS=600
+ENV LIBRARY_CACHE_MAX_AGE_SECONDS=300
+
+EXPOSE 8080
+CMD ["python", "-m", "uvicorn", "app.server:app", "--host", "0.0.0.0", "--port", "8080"]
