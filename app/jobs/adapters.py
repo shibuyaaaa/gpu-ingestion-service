@@ -299,6 +299,7 @@ class DissectAdapter(JobAdapter):
                         status="partial",
                     )
                     early_library_publish = chord_publish.to_dict()
+                    _ensure_library_publish_ok(early_library_publish)
                     chord_published = True
 
         return {
@@ -344,6 +345,7 @@ class DissectAdapter(JobAdapter):
                 sibling_summary = context.store.child_summary(root_job_id, exclude_job_id=job.id)
                 if sibling_summary["active"] == 0 and sibling_summary["failed"] == 0:
                     library_complete = (await context.library_writer.mark_complete(job=job)).to_dict()
+                    _ensure_library_publish_ok(library_complete)
             final_outputs = {
                 "job_type": job.job_type.value,
                 "source": job.artifacts.get("source"),
@@ -385,11 +387,13 @@ class DissectAdapter(JobAdapter):
                         status="partial",
                     )
                 ).to_dict()
+                _ensure_library_publish_ok(library_publish)
                 result["library_publish"] = library_publish
                 root_job_id = str(job.artifacts.get("root_job_id") or job.payload.get("root_job_id") or job.id)
                 sibling_summary = context.store.child_summary(root_job_id, exclude_job_id=job.id)
                 if sibling_summary["active"] == 0 and sibling_summary["failed"] == 0:
                     library_complete = (await context.library_writer.mark_complete(job=job)).to_dict()
+                    _ensure_library_publish_ok(library_complete)
 
             final_outputs = {
                 "job_type": job.job_type.value,
@@ -579,6 +583,7 @@ class BulkDissectAdapter(DissectAdapter):
                 library_publish = (
                     await context.library_writer.mark_complete(job=job)
                 ).to_dict()
+                _ensure_library_publish_ok(library_publish)
             final_outputs = {
                 "job_type": job.job_type.value,
                 "source": job.artifacts.get("source"),
@@ -616,6 +621,7 @@ class BulkDissectAdapter(DissectAdapter):
                     status="partial" if remaining else "complete",
                 )
             ).to_dict()
+            _ensure_library_publish_ok(library_publish)
             result["library_publish"] = library_publish
         return StageResult(
             next_stage=JobStage.PROCESS if remaining else None,
@@ -657,6 +663,7 @@ class QuickDissectAdapter(DissectAdapter):
                     status="partial",
                 )
             ).to_dict()
+            _ensure_library_publish_ok(library_publish)
             chorus_result["library_publish"] = library_publish
         continuation = context.store.enqueue_continuation(
             parent_job=job,
@@ -724,6 +731,11 @@ def _canonical_stem_type(stem: str) -> str:
         "instrumental": "chord",
     }
     return mapping.get(stem.strip().lower(), stem.strip().lower())
+
+
+def _ensure_library_publish_ok(result: dict[str, Any] | None) -> None:
+    if result and result.get("enabled") and result.get("error"):
+        raise RuntimeError(f"library publish failed: {result['error']}")
 
 
 def _ordered_upload_stems(stems: dict[str, str]) -> list[tuple[str, str]]:
