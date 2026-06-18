@@ -1,6 +1,7 @@
 import asyncio
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -273,6 +274,8 @@ class DissectAdapter(JobAdapter):
 
         if context.settings.dry_run_mode:
             uploaded = {stem: path for stem, path in selected_stems.items()}
+            early_library_publish = None
+            manifest_url = None
         else:
             uploaded = {}
             chord_published = False
@@ -301,6 +304,16 @@ class DissectAdapter(JobAdapter):
                     early_library_publish = chord_publish.to_dict()
                     _ensure_library_publish_ok(early_library_publish)
                     chord_published = True
+            manifest_url = await _upload_segment_manifest(
+                job=job,
+                context=context,
+                segment_dir=segment_dir,
+                segment=segment,
+                segment_id=segment_id,
+                stem_group=stem_group,
+                outputs=uploaded,
+                library_publish=early_library_publish,
+            )
 
         return {
             "segment": segment,
@@ -308,6 +321,7 @@ class DissectAdapter(JobAdapter):
             "stem_paths": stems,
             "outputs": uploaded,
             "early_library_publish": early_library_publish if not context.settings.dry_run_mode else None,
+            "manifest_url": manifest_url,
         }
 
     async def _process_fanout_job(self, job: JobRecord, context: JobContext) -> StageResult:
@@ -736,6 +750,53 @@ def _canonical_stem_type(stem: str) -> str:
 def _ensure_library_publish_ok(result: dict[str, Any] | None) -> None:
     if result and result.get("enabled") and result.get("error"):
         raise RuntimeError(f"library publish failed: {result['error']}")
+
+
+async def _upload_segment_manifest(
+    *,
+    job: JobRecord,
+    context: JobContext,
+    segment_dir: Path,
+    segment: dict[str, Any],
+    segment_id: str,
+    stem_group: str,
+    outputs: dict[str, str],
+    library_publish: dict[str, Any] | None,
+) -> str:
+    manifest = {
+        "schema_version": 1,
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "job": {
+            "id": job.id,
+            "type": job.job_type.value,
+            "stage": job.stage.value,
+            "priority": job.priority,
+            "payload": job.payload,
+        },
+        "source": {
+            "source": job.artifacts.get("source"),
+            "youtube_url": job.artifacts.get("youtube_url"),
+            "spotify_metadata": job.artifacts.get("spotify_metadata"),
+            "youtube_match": job.artifacts.get("youtube_match"),
+        },
+        "analysis": {
+            "segment": segment,
+            "segment_id": segment_id,
+            "stem_group": stem_group,
+            "process_mode": job.artifacts.get("process_mode"),
+            "process_group": job.artifacts.get("process_group"),
+            "root_job_id": job.artifacts.get("root_job_id"),
+        },
+        "outputs": outputs,
+        "library_publish": library_publish,
+    }
+    manifest_path = segment_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return await context.gcs.upload(
+        manifest_path,
+        f"gpu-ingestion/{job.id}/segments/{segment_id}/manifest.json",
+        content_type="application/json",
+    )
 
 
 def _ordered_upload_stems(stems: dict[str, str]) -> list[tuple[str, str]]:
