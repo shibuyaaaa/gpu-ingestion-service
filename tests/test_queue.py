@@ -199,6 +199,39 @@ def test_recover_stale_processing_jobs():
         assert job.worker_id is None
 
 
+def test_recover_processing_after_restart_counts_as_attempt():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        store.enqueue({"job_id": "a", "job_type": "bulk_dissect", "source": "song"})
+        claimed = store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        assert claimed is not None
+
+        recovered = store.recover_processing_after_restart(error="crashed")
+
+        assert recovered == 1
+        job = store.get("a")
+        assert job.status == JobStatus.QUEUED
+        assert job.worker_id is None
+        assert job.attempts == 1
+        assert job.error == "crashed"
+
+
+def test_recover_processing_after_restart_fails_at_max_attempts():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        store.enqueue({"job_id": "a", "job_type": "bulk_dissect", "source": "song"}, max_attempts=1)
+        claimed = store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        assert claimed is not None
+
+        recovered = store.recover_processing_after_restart(error="crashed")
+
+        assert recovered == 1
+        job = store.get("a")
+        assert job.status == JobStatus.FAILED
+        assert job.attempts == 1
+        assert job.error == "crashed"
+
+
 def test_inactive_work_dirs_returns_only_terminal_dirs():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)

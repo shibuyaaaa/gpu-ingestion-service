@@ -457,6 +457,55 @@ class JobStore:
             self.add_event(job_id, JobEventType.LEASE_RECOVERED, message="requeued stale processing job")
         return len(job_ids)
 
+    def recover_processing_after_restart(self, *, error: str = "recovered processing job after service restart") -> int:
+        now = time.time()
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT id, attempts, max_attempts FROM jobs
+                WHERE status = ?
+                """,
+                (JobStatus.PROCESSING.value,),
+            ).fetchall()
+            if not rows:
+                conn.execute("COMMIT")
+                return 0
+            for row in rows:
+                attempts = int(row["attempts"]) + 1
+                terminal = attempts >= int(row["max_attempts"])
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        worker_id = NULL,
+                        attempts = ?,
+                        error = ?,
+                        updated_at = ?,
+                        available_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        JobStatus.FAILED.value if terminal else JobStatus.QUEUED.value,
+                        attempts,
+                        error,
+                        now,
+                        now,
+                        row["id"],
+                    ),
+                )
+            conn.execute("COMMIT")
+        for row in rows:
+            attempts = int(row["attempts"]) + 1
+            terminal = attempts >= int(row["max_attempts"])
+            self.add_event(
+                row["id"],
+                JobEventType.FAILED if terminal else JobEventType.LEASE_RECOVERED,
+                message=error,
+                data={"attempts": attempts, "terminal": terminal},
+            )
+        return len(rows)
+
     def inactive_work_dirs(self, *, older_than_seconds: float, limit: int = 100) -> list[str]:
         cutoff = time.time() - older_than_seconds
         with self._connect() as conn:

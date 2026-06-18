@@ -61,11 +61,11 @@ class WorkerManager:
     async def start(self) -> None:
         if self._tasks:
             return
-        recovered = self.context.store.recover_stale_processing(
-            lease_timeout_seconds=self.context.settings.job_lease_timeout_seconds
+        recovered = self.context.store.recover_processing_after_restart(
+            error="recovered processing job after service startup"
         )
         if recovered:
-            logger.warning("requeued %d stale processing jobs on startup", recovered)
+            logger.warning("recovered %d processing jobs on startup", recovered)
         await self.context.models.warmup()
         for idx in range(self.context.settings.download_workers):
             self._start_worker(f"download-{idx}", [JobStage.DOWNLOAD], self.context.settings.download_batch_size)
