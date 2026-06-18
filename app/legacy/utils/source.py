@@ -17,6 +17,7 @@ YOUTUBE_URL_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|
 
 _spotify_access_token: str | None = None
 _spotify_token_expires_at = 0.0
+_spotify_request_lock = asyncio.Lock()
 
 
 async def resolve_spotify_source(source: str, *, max_youtube_results: int = 5) -> dict[str, Any]:
@@ -209,27 +210,47 @@ async def _spotify_token() -> str:
 
 
 async def _get_spotify_track(track_id: str) -> dict[str, Any]:
-    token = await _spotify_token()
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"https://api.spotify.com/v1/tracks/{track_id}",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        response.raise_for_status()
-        return response.json()
+    return await _spotify_get_json(f"https://api.spotify.com/v1/tracks/{track_id}")
 
 
 async def _search_spotify_tracks(query: str, *, limit: int) -> list[dict[str, Any]]:
-    token = await _spotify_token()
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            "https://api.spotify.com/v1/search",
-            params={"q": query, "type": "track", "limit": limit},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        response.raise_for_status()
-        data = response.json()
+    data = await _spotify_get_json(
+        "https://api.spotify.com/v1/search",
+        params={"q": query, "type": "track", "limit": limit},
+    )
     return [_format_spotify_track(track) for track in data.get("tracks", {}).get("items", [])]
+
+
+async def _spotify_get_json(url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    for attempt in range(5):
+        async with _spotify_request_lock:
+            token = await _spotify_token()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    url,
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            if response.status_code != 429:
+                response.raise_for_status()
+                return response.json()
+
+            retry_after = _retry_after_seconds(response)
+            logger.warning("spotify rate limited; sleeping %.1fs before retry", retry_after)
+        await asyncio.sleep(retry_after)
+
+    response.raise_for_status()
+    return response.json()
+
+
+def _retry_after_seconds(response: httpx.Response) -> float:
+    value = response.headers.get("retry-after") or response.headers.get("Retry-After")
+    try:
+        if value is not None:
+            return min(max(float(value), 1.0), 120.0)
+    except ValueError:
+        pass
+    return 5.0
 
 
 def _format_spotify_track(track: dict[str, Any]) -> dict[str, Any]:
