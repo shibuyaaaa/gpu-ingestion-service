@@ -3,7 +3,7 @@ from pathlib import Path
 
 from app.config import Settings
 from app.crawler.kworb import parse_kworb_chart
-from app.crawler.ops import JobTerminalState
+from app.crawler.ops import IngestionOpsUnavailable, JobTerminalState
 from app.crawler.runner import CrawlerRunner
 from app.crawler.spotify import _dedupe_and_sort
 from app.crawler.store import CrawlerStore
@@ -46,10 +46,13 @@ class FakeLibrary:
 
 
 class FakeOps:
-    def __init__(self):
+    def __init__(self, *, unavailable: bool = False):
         self.states: dict[str, JobTerminalState] = {}
+        self.unavailable = unavailable
 
     async def job_state(self, job_id: str) -> JobTerminalState:
+        if self.unavailable:
+            raise IngestionOpsUnavailable("local API unavailable")
         return self.states.get(job_id, JobTerminalState(status="running", root_status="queued", child_summary={}))
 
 
@@ -221,6 +224,30 @@ async def test_waiting_session_rechecks_failed_submission_until_session_closes()
         assert detail["status"] == "waiting"
         assert detail["failed_count"] == 0
         assert detail["completed_count"] == 1
+
+
+async def test_waiting_session_retries_when_ops_api_is_temporarily_unavailable():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(tmp, batch_size=1)
+        store = CrawlerStore(Path(tmp) / "crawler.sqlite3")
+        provider = FakeProvider([_candidate("a", popularity=99, rank=0)])
+        ops = FakeOps(unavailable=True)
+        publisher = FakePublisher()
+        runner = CrawlerRunner(
+            settings=settings,
+            store=store,
+            provider=provider,
+            publisher=publisher,
+            ops=ops,
+            library=FakeLibrary(),
+        )
+
+        await runner.run_once()
+        result = await runner.run_once()
+
+        assert result["ops_unavailable"] is True
+        assert store.get_active_session()["status"] == "waiting"
+        assert store.submissions_for_session(store.get_active_session()["id"])[0]["status"] == "submitted"
 
 
 async def test_local_publish_failure_is_retryable_without_duplicating_successes():

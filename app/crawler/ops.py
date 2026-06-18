@@ -4,6 +4,10 @@ from typing import Any
 import httpx
 
 
+class IngestionOpsUnavailable(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class JobTerminalState:
     status: str
@@ -24,19 +28,26 @@ class IngestionOpsClient:
         self.timeout_seconds = timeout_seconds
 
     async def job_state(self, job_id: str) -> JobTerminalState:
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            job_response = await client.get(f"{self.base_url}/ops/jobs/{job_id}")
-            if job_response.status_code == 404:
-                return JobTerminalState(status="pending_delivery", root_status=None, child_summary={})
-            job_response.raise_for_status()
-            job = job_response.json()
-            root_status = str(job.get("status") or "")
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                job_response = await client.get(f"{self.base_url}/ops/jobs/{job_id}")
+                if job_response.status_code == 404:
+                    return JobTerminalState(status="pending_delivery", root_status=None, child_summary={})
+                job_response.raise_for_status()
+                job = job_response.json()
+                root_status = str(job.get("status") or "")
 
-            child_response = await client.get(f"{self.base_url}/ops/jobs/{job_id}/children-summary")
-            child_summary = {}
-            if child_response.status_code != 404:
-                child_response.raise_for_status()
-                child_summary = child_response.json()
+                child_response = await client.get(f"{self.base_url}/ops/jobs/{job_id}/children-summary")
+                child_summary = {}
+                if child_response.status_code != 404:
+                    child_response.raise_for_status()
+                    child_summary = child_response.json()
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise IngestionOpsUnavailable(str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {502, 503, 504}:
+                raise IngestionOpsUnavailable(str(exc)) from exc
+            raise
 
         active_children = int(child_summary.get("active", 0) or 0)
         failed_children = int(child_summary.get("failed", 0) or 0)

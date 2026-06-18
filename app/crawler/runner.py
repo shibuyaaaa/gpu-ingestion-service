@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from app.config import Settings, settings
 from app.crawler.kworb import KworbSpotifyChartClient
-from app.crawler.ops import IngestionOpsClient
+from app.crawler.ops import IngestionOpsClient, IngestionOpsUnavailable
 from app.crawler.publisher import LocalIngestionPublisher
 from app.crawler.spotify import SpotifyChartPlaylistClient
 from app.crawler.store import CrawlerStore
@@ -170,7 +170,15 @@ class CrawlerRunner:
         for submission in submissions:
             if submission["status"] == "completed":
                 continue
-            state = await self.ops.job_state(submission["job_id"])
+            try:
+                state = await self.ops.job_state(submission["job_id"])
+            except IngestionOpsUnavailable as exc:
+                logger.warning("ingestion ops unavailable; retrying crawler session later: %s", exc)
+                self.store.mark_session_waiting(
+                    session_id,
+                    next_poll_at=self._now() + self.settings.crawler_poll_seconds,
+                )
+                return {"session_id": session_id, "completed": False, "status": "waiting", "ops_unavailable": True}
             self.store.update_submission_status(
                 job_id=submission["job_id"],
                 status=state.status,
