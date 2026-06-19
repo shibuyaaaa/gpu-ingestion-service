@@ -1,6 +1,7 @@
 import asyncio
 import json
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -110,8 +111,8 @@ class DissectAdapter(JobAdapter):
         segments = self._normalize_segments(analysis)
         chorus_segment = self._find_chorus_segment(segments)
         full_stem_urls = result.get("stem_urls") or {}
-        full_stem_paths = {}
-        if full_stem_urls and not context.settings.dry_run_mode:
+        full_stem_paths = result.get("stem_paths") or result.get("full_stem_paths") or {}
+        if not full_stem_paths and full_stem_urls and not context.settings.dry_run_mode:
             full_stem_paths = await self._download_full_stems(full_stem_urls, Path(job.artifacts["work_dir"]))
         artifacts = {
             "analysis": analysis,
@@ -242,32 +243,46 @@ class DissectAdapter(JobAdapter):
         stem_group: str = "all",
     ) -> dict[str, Any]:
         work_dir = Path(job.artifacts["work_dir"])
+        timings: dict[str, float] = {}
         segment_id = str(segment["id"])
         segment_dir = work_dir / output_prefix / segment_id
         segment_dir.mkdir(parents=True, exist_ok=True)
-        existing_segment_path = job.artifacts.get("segment_path")
-        segment_path = Path(existing_segment_path) if existing_segment_path else segment_dir / "input.mp3"
-        if existing_segment_path and segment_path.exists():
-            pass
-        elif context.settings.dry_run_mode:
-            shutil.copyfile(job.artifacts["audio_path"], segment_path)
-        else:
-            await AudioOps.extract_segment(
-                job.artifacts["audio_path"],
-                segment_path,
-                start=float(segment["start"]),
-                duration=max(0.1, float(segment["end"]) - float(segment["start"])),
-            )
-
         stems_dir = segment_dir / "stems"
         existing_stem_paths = job.artifacts.get("stem_paths") or {}
+        full_stem_paths = job.artifacts.get("full_stem_paths") or {}
+        can_slice_full_stems = bool(full_stem_paths) and not context.settings.dry_run_mode
+        needs_source_segment = not existing_stem_paths and not can_slice_full_stems
+        existing_segment_path = job.artifacts.get("segment_path")
+        segment_path = Path(existing_segment_path) if existing_segment_path else None
+        if needs_source_segment:
+            segment_path = Path(existing_segment_path) if existing_segment_path else segment_dir / "input.mp3"
+            if existing_segment_path and segment_path.exists():
+                pass
+            elif context.settings.dry_run_mode:
+                shutil.copyfile(job.artifacts["audio_path"], segment_path)
+            else:
+                started = time.perf_counter()
+                await AudioOps.extract_segment(
+                    job.artifacts["audio_path"],
+                    segment_path,
+                    start=float(segment["start"]),
+                    duration=max(0.1, float(segment["end"]) - float(segment["start"])),
+                )
+                timings["source_segment_extract_seconds"] = round(time.perf_counter() - started, 6)
+
         if existing_stem_paths:
             stems = dict(existing_stem_paths)
+            stem_source = "inherited_segment_stems"
         else:
-            full_stem_paths = job.artifacts.get("full_stem_paths") or {}
-            if full_stem_paths and not context.settings.dry_run_mode:
+            if can_slice_full_stems:
+                started = time.perf_counter()
                 stems = await self._extract_stem_segments(full_stem_paths, stems_dir, segment)
+                timings["stem_segment_extract_seconds"] = round(time.perf_counter() - started, 6)
+                stem_source = "all_in_one_full_song_stems"
             else:
+                if segment_path is None:
+                    raise RuntimeError("segment audio path was not prepared for HTDemucs processing")
+                started = time.perf_counter()
                 async with context.models.gpu_lock:
                     context.models.active_gpu_job_id = job.id
                     context.models.active_gpu_model = "htdemucs"
@@ -276,6 +291,8 @@ class DissectAdapter(JobAdapter):
                     finally:
                         context.models.active_gpu_job_id = None
                         context.models.active_gpu_model = None
+                timings["htdemucs_segment_seconds"] = round(time.perf_counter() - started, 6)
+                stem_source = "segment_htdemucs"
 
         selected_stems = dict(_filter_stems(stems, stem_group))
 
@@ -287,6 +304,7 @@ class DissectAdapter(JobAdapter):
             uploaded = {}
             chord_published = False
             early_library_publish = None
+            upload_started = time.perf_counter()
             for stem, path in _ordered_upload_stems(selected_stems):
                 local_path = Path(path)
                 if local_path.suffix.lower() != ".mp3":
@@ -298,7 +316,7 @@ class DissectAdapter(JobAdapter):
                 if not chord_published and _canonical_stem_type(stem) == "chord":
                     chord_result = {
                         "segment": segment,
-                        "segment_path": str(segment_path),
+                        "segment_path": str(segment_path) if segment_path else None,
                         "stem_paths": stems,
                         "outputs": dict(uploaded),
                     }
@@ -311,6 +329,7 @@ class DissectAdapter(JobAdapter):
                     early_library_publish = chord_publish.to_dict()
                     _ensure_library_publish_ok(early_library_publish)
                     chord_published = True
+            timings["upload_and_publish_seconds"] = round(time.perf_counter() - upload_started, 6)
             manifest_url = await _upload_segment_manifest(
                 job=job,
                 context=context,
@@ -324,8 +343,10 @@ class DissectAdapter(JobAdapter):
 
         return {
             "segment": segment,
-            "segment_path": str(segment_path),
+            "segment_path": str(segment_path) if segment_path else None,
             "stem_paths": stems,
+            "stem_source": stem_source,
+            "timings": timings,
             "outputs": uploaded,
             "early_library_publish": early_library_publish if not context.settings.dry_run_mode else None,
             "manifest_url": manifest_url,

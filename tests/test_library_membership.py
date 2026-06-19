@@ -352,3 +352,5 @@ async def test_segment_processing_publishes_chord_before_remaining_stems(monkeyp
 
         assert events[:3] == ["upload:other", "publish:other:partial", "upload:vocals"]
         assert result["early_library_publish"]["status"] == "partial"
+        assert result["stem_source"] == "all_in_one_full_song_stems"
+        assert "stem_segment_extract_seconds" in result["timings"]

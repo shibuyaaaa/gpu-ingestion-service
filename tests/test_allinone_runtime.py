@@ -15,6 +15,10 @@ class FakeAllInOne:
         output_dir = Path(kwargs["out_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "result.json").write_text(json.dumps({"segments": []}), encoding="utf-8")
+        demix_dir = Path(kwargs["demix_dir"]) / "htdemucs_ft" / "input"
+        demix_dir.mkdir(parents=True, exist_ok=True)
+        for stem in ("bass", "drums", "other", "vocals"):
+            (demix_dir / f"{stem}.wav").write_bytes(stem.encode())
         return "ok"
 
 
@@ -30,13 +34,37 @@ def test_allinone_analysis_uses_fresh_byproducts_and_overwrite(tmp_path, monkeyp
     fake = FakeAllInOne()
     runtime._allin1 = fake
     monkeypatch.setattr(runtime, "_ensure_static_models_link", lambda byproduct_root: None)
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs_ft")
+    demix_dir = output_dir / "byproducts" / "demix" / "htdemucs_ft" / "input"
 
-    runtime._analyze_sync(audio_path, output_dir)
+    result = runtime._analyze_sync(audio_path, output_dir)
 
     assert fake.kwargs is not None
     assert fake.kwargs["overwrite"] is True
-    assert fake.kwargs["keep_byproducts"] is False
+    assert fake.kwargs["keep_byproducts"] is True
     assert not stale_file.exists()
+    assert result["stem_paths"] == {
+        "bass": str(demix_dir / "bass.wav"),
+        "drums": str(demix_dir / "drums.wav"),
+        "other": str(demix_dir / "other.wav"),
+        "vocals": str(demix_dir / "vocals.wav"),
+    }
+
+
+def test_find_demix_stems_returns_only_existing_stems(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs_ft")
+    byproducts = tmp_path / "byproducts"
+    stem_dir = byproducts / "demix" / "htdemucs_ft" / "song"
+    stem_dir.mkdir(parents=True)
+    (stem_dir / "other.wav").write_bytes(b"other")
+    (stem_dir / "vocals.wav").write_bytes(b"vocals")
+
+    stems = AllInOneRuntime._find_demix_stems(byproducts, tmp_path / "song.wav")
+
+    assert stems == {
+        "other": str(stem_dir / "other.wav"),
+        "vocals": str(stem_dir / "vocals.wav"),
+    }
 
 
 def test_memory_bounded_demix_adds_segment_limit(tmp_path, monkeypatch):

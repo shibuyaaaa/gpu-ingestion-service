@@ -86,16 +86,18 @@ class AllInOneRuntime:
             include_embeddings=False,
             demix_dir=str(byproduct_root / "demix"),
             spec_dir=str(byproduct_root / "spec"),
-            keep_byproducts=False,
+            keep_byproducts=True,
             overwrite=True,
         )
         analysis_path = self._find_analysis_json(output_dir)
         analysis: dict[str, Any] = {}
         if analysis_path:
             analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        stem_paths = self._find_demix_stems(byproduct_root, audio_path)
         return {
             "analysis": analysis,
             "analyzer_result_path": str(analysis_path) if analysis_path else None,
+            "stem_paths": stem_paths,
             "raw_result": str(result),
         }
 
@@ -153,6 +155,16 @@ class AllInOneRuntime:
             if candidate.name in {"result.json", "analyzer_result.json"}:
                 return candidate
         return candidates[0] if candidates else None
+
+    @staticmethod
+    def _find_demix_stems(byproduct_root: Path, audio_path: Path) -> dict[str, str]:
+        stem_dir = byproduct_root / "demix" / _demucs_model_name() / audio_path.stem
+        stems: dict[str, str] = {}
+        for stem in _DEMUCS_STEMS:
+            path = stem_dir / f"{stem}.wav"
+            if path.is_file():
+                stems[stem] = str(path)
+        return stems
 
     def status(self) -> dict[str, Any]:
         return {
