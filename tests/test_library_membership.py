@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import uuid
 from pathlib import Path
 
 from app.config import Settings
@@ -21,6 +22,18 @@ def _row(song_id: str, title: str, artists: list[str]) -> dict:
         "genre": "Pop",
         "cover_art_url": None,
     }
+
+
+def test_library_publish_result_serializes_uuid_rows():
+    stem_id = uuid.uuid4()
+    result = LibraryPublishResult(
+        enabled=True,
+        song_id=str(uuid.uuid4()),
+        status="partial",
+        inserted_stems=[{"id": stem_id, "stem_type": "chord"}],
+    )
+
+    assert result.to_dict()["inserted_stems"][0]["id"] == str(stem_id)
 
 
 class FakeDB:

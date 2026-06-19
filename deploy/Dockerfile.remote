@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
     git \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR ${APP_HOME}

@@ -20,9 +20,9 @@ class LibraryPublishResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
-            "song_id": self.song_id,
+            "song_id": str(self.song_id) if self.song_id is not None else None,
             "status": self.status,
-            "inserted_stems": self.inserted_stems or [],
+            "inserted_stems": _json_safe(self.inserted_stems or []),
             "error": self.error,
         }
 
@@ -79,7 +79,7 @@ class LibraryWriter:
                 enabled=True,
                 song_id=song_id,
                 status=status,
-                inserted_stems=[dict(row) for row in stem_rows],
+                inserted_stems=[_json_safe(dict(row)) for row in stem_rows],
             )
         except Exception as exc:
             return LibraryPublishResult(enabled=True, status=status, error=str(exc)[:1000])
@@ -433,3 +433,15 @@ def _number_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
