@@ -45,6 +45,7 @@ def test_memory_bounded_demix_adds_segment_limit(tmp_path, monkeypatch):
     demix_dir = tmp_path / "demix"
     captured = {}
     monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs_ft")
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_BACKEND", "cli")
 
     def fake_run(cmd, check):
         captured["cmd"] = cmd
@@ -75,6 +76,7 @@ def test_memory_bounded_demix_uses_static_repo_when_model_yaml_exists(tmp_path, 
     (static_models / "htdemucs.yaml").write_text("model: htdemucs", encoding="utf-8")
     captured = {}
     monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs")
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_BACKEND", "cli")
 
     def fake_run(cmd, check):
         captured["cmd"] = cmd
@@ -87,3 +89,29 @@ def test_memory_bounded_demix_uses_static_repo_when_model_yaml_exists(tmp_path, 
 
     assert "--repo" in captured["cmd"]
     assert captured["cmd"][captured["cmd"].index("--repo") + 1] == str(static_models.resolve())
+
+
+def test_memory_bounded_demix_uses_resident_backend_by_default(tmp_path, monkeypatch):
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"audio")
+    demix_dir = tmp_path / "demix"
+    calls = {}
+    monkeypatch.delenv("ALL_IN_ONE_DEMUCS_BACKEND", raising=False)
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs_ft")
+
+    def fake_resident(paths, output_dir, device, demucs_model, static_models_dir):
+        calls["paths"] = paths
+        calls["output_dir"] = output_dir
+        calls["device"] = device
+        calls["demucs_model"] = demucs_model
+        calls["static_models_dir"] = static_models_dir
+
+    monkeypatch.setattr(allinone_module, "_run_demucs_resident", fake_resident)
+
+    demix_paths = AllInOneRuntime._memory_bounded_demix([audio_path], demix_dir, "cuda:0")
+
+    assert demix_paths == [demix_dir / "htdemucs_ft" / "input"]
+    assert calls["paths"] == [audio_path]
+    assert calls["output_dir"] == demix_dir
+    assert calls["device"] == "cuda:0"
+    assert calls["demucs_model"] == "htdemucs_ft"

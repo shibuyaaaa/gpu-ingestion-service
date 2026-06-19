@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +109,7 @@ class AllInOneRuntime:
 
     @staticmethod
     def _memory_bounded_demix(paths: list[Path], demix_dir: Path, device: Any) -> list[Path]:
-        """Drop-in all-in-one Demucs hook with bounded segment size for 16GB L4 VMs."""
+        """Drop-in all-in-one Demucs hook with resident weights for L4 VMs."""
         todos = []
         demix_paths = []
         for path in paths:
@@ -127,29 +128,11 @@ class AllInOneRuntime:
 
         demucs_model = _demucs_model_name()
         static_models_dir = (demix_dir.parent / "static_models").resolve()
-        cmd = [
-            sys.executable,
-            "-m",
-            "demucs.separate",
-            "--out",
-            demix_dir.as_posix(),
-            "--name",
-            demucs_model,
-            "--device",
-            str(device),
-            "-n",
-            demucs_model,
-        ]
-        if (static_models_dir / f"{demucs_model}.yaml").is_file():
-            cmd.extend(["--repo", static_models_dir.as_posix()])
-        segment_seconds = os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5").strip()
-        if segment_seconds:
-            cmd.extend(["--segment", segment_seconds])
-        jobs = os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0").strip()
-        if jobs:
-            cmd.extend(["--jobs", jobs])
-        cmd.extend(path.as_posix() for path in todos)
-        subprocess.run(cmd, check=True)
+        if _demucs_backend() == "cli":
+            _run_demucs_cli(todos, demix_dir, device, demucs_model, static_models_dir)
+            return demix_paths
+
+        _run_demucs_resident(todos, demix_dir, device, demucs_model, static_models_dir)
         return demix_paths
 
     @staticmethod
@@ -190,14 +173,163 @@ class AllInOneRuntime:
             },
             "demucs": {
                 "model": _demucs_model_name(),
+                "backend": _demucs_backend(),
                 "segment_seconds": os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5"),
                 "jobs": os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0"),
+                "resident_cache_keys": list(_DEMUCS_MODEL_CACHE.keys()),
             },
         }
 
 
+def _run_demucs_cli(paths: list[Path], demix_dir: Path, device: Any, demucs_model: str, static_models_dir: Path) -> None:
+    cmd = [
+        sys.executable,
+        "-m",
+        "demucs.separate",
+        "--out",
+        demix_dir.as_posix(),
+        "--name",
+        demucs_model,
+        "--device",
+        str(device),
+        "-n",
+        demucs_model,
+    ]
+    if (static_models_dir / f"{demucs_model}.yaml").is_file():
+        cmd.extend(["--repo", static_models_dir.as_posix()])
+    segment_seconds = os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5").strip()
+    if segment_seconds:
+        cmd.extend(["--segment", segment_seconds])
+    jobs = os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0").strip()
+    if jobs:
+        cmd.extend(["--jobs", jobs])
+    cmd.extend(path.as_posix() for path in paths)
+    subprocess.run(cmd, check=True)
+
+
+def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs_model: str, static_models_dir: Path) -> None:
+    import torch
+    from demucs.apply import apply_model
+    from demucs.audio import AudioFile, save_audio
+
+    model = _resident_demucs_model(demucs_model, device, static_models_dir)
+    torch_device = torch.device(device)
+    segment = _optional_float_env("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS")
+    jobs = _int_env("ALL_IN_ONE_DEMUCS_JOBS", 0)
+    for path in paths:
+        path = Path(path)
+        out_dir = demix_dir / demucs_model / path.stem
+        out_dir.mkdir(parents=True, exist_ok=True)
+        wav = AudioFile(str(path)).read(
+            streams=0,
+            samplerate=model.samplerate,
+            channels=model.audio_channels,
+        )
+        ref = wav.mean(0)
+        wav = (wav - ref.mean()) / ref.std()
+        batch = wav[None]
+        if _bool_env("ALL_IN_ONE_DEMUCS_PIN_MEMORY", True):
+            batch = _maybe_pin(batch)
+        with torch.inference_mode():
+            device_batch = _transfer_to_device(batch, torch_device)
+            sources = apply_model(
+                model,
+                device_batch,
+                device=torch_device,
+                split=True,
+                overlap=_float_env("ALL_IN_ONE_DEMUCS_OVERLAP", 0.25),
+                segment=segment,
+                num_workers=jobs,
+                progress=False,
+            )[0]
+            sources = sources * ref.std() + ref.mean()
+        for source, name in zip(sources, model.sources):
+            save_audio(source.cpu(), str(out_dir / f"{name}.wav"), samplerate=model.samplerate)
+
+
+def _resident_demucs_model(model_name: str, device: Any, static_models_dir: Path) -> Any:
+    import torch
+    from demucs.pretrained import get_model
+
+    repo = static_models_dir if (static_models_dir / f"{model_name}.yaml").is_file() else None
+    cache_key = f"{model_name}:{device}:{repo or 'default'}"
+    with _DEMUCS_MODEL_LOCK:
+        cached = _DEMUCS_MODEL_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        if repo is not None:
+            try:
+                model = get_model(model_name, repo=repo)
+            except TypeError:
+                model = get_model(model_name)
+        else:
+            model = get_model(model_name)
+        model.to(torch.device(device))
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad_(False)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(torch.device(device))
+        _DEMUCS_MODEL_CACHE[cache_key] = model
+        return model
+
+
 _DEMUCS_STEMS = ("bass", "drums", "other", "vocals")
+_DEMUCS_MODEL_CACHE: dict[str, Any] = {}
+_DEMUCS_MODEL_LOCK = threading.RLock()
 
 
 def _demucs_model_name() -> str:
     return os.getenv("ALL_IN_ONE_DEMUCS_MODEL", os.getenv("HTDEMUCS_MODEL", "htdemucs_ft")).strip() or "htdemucs_ft"
+
+
+def _demucs_backend() -> str:
+    value = os.getenv("ALL_IN_ONE_DEMUCS_BACKEND", "resident").strip().lower()
+    return value if value in {"resident", "cli"} else "resident"
+
+
+def _transfer_to_device(batch: Any, device: Any) -> Any:
+    import torch
+
+    if getattr(device, "type", None) != "cuda":
+        return batch.to(device)
+    stream = torch.cuda.Stream(device=device)
+    with torch.cuda.stream(stream):
+        device_batch = batch.to(device, non_blocking=True)
+    stream.synchronize()
+    return device_batch
+
+
+def _maybe_pin(tensor: Any) -> Any:
+    try:
+        return tensor.pin_memory()
+    except RuntimeError:
+        return tensor
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
+def _optional_float_env(name: str) -> float | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return float(value)
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return int(value)
