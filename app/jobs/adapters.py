@@ -185,6 +185,7 @@ class DissectAdapter(JobAdapter):
                     "parent_job_id": job.id,
                     "segment_id": segment_id,
                     "segment": segment,
+                    "requires_gpu": not bool(artifacts.get("full_stem_paths")),
                     "other_stems_priority": (
                         PROCESS_PRIORITY_QUICK_OTHER if is_quick_chorus else PROCESS_PRIORITY_BULK_OTHER
                     ),
@@ -503,6 +504,7 @@ class DissectAdapter(JobAdapter):
                 "segment_path": chord_result.get("segment_path"),
                 "stem_paths": chord_result.get("stem_paths") or {},
                 "chord_outputs": chord_result.get("outputs") or {},
+                "requires_gpu": False,
             },
         )
 

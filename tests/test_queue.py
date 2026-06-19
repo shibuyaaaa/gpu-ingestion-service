@@ -208,6 +208,62 @@ def test_gpu_claim_order_prioritizes_quick_chord_over_bulk_analysis():
         assert [job.id for job in claimed] == ["quick:quick:seg-1:chord", "bulk"]
 
 
+def test_cpu_process_claim_only_takes_jobs_that_do_not_require_gpu():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "quick_dissect", "source": "song"})
+        store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:quick:seg-1:chord",
+            job_type=JobType.QUICK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-1", "requires_gpu": False},
+            priority=PROCESS_PRIORITY_QUICK_CHORD,
+        )
+        store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:quick:seg-2:chord",
+            job_type=JobType.QUICK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-2", "requires_gpu": True},
+            priority=PROCESS_PRIORITY_QUICK_CHORD,
+        )
+
+        claimed = store.claim_cpu_process_batch("cpu-process", limit=10)
+
+        assert [job.id for job in claimed] == ["root:quick:seg-1:chord"]
+        assert store.get("root:quick:seg-2:chord").status == JobStatus.QUEUED
+
+
+def test_gpu_claim_takes_analyze_and_gpu_required_process_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "quick_dissect", "source": "song"})
+        bulk, _ = store.enqueue({"job_id": "bulk", "job_type": "bulk_dissect", "source": "song"})
+        store.complete_stage(bulk.id, next_stage=JobStage.ANALYZE)
+        store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:quick:seg-1:chord",
+            job_type=JobType.QUICK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-1", "requires_gpu": False},
+            priority=PROCESS_PRIORITY_QUICK_CHORD,
+        )
+        store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:quick:seg-2:chord",
+            job_type=JobType.QUICK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-2", "requires_gpu": True},
+            priority=PROCESS_PRIORITY_QUICK_CHORD,
+        )
+
+        claimed = store.claim_gpu_batch("gpu", limit=10)
+
+        assert [job.id for job in claimed] == ["root:quick:seg-2:chord", "bulk"]
+        assert store.get("root:quick:seg-1:chord").status == JobStatus.QUEUED
+
+
 def test_job_type_default_priorities_are_applied():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)

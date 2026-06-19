@@ -21,6 +21,7 @@ class WorkerState:
     worker_id: str
     stages: list[JobStage]
     batch_size: int
+    claim_mode: str = "stages"
     active_job_ids: list[str] = None
     processed: int = 0
     failures: int = 0
@@ -35,6 +36,7 @@ class WorkerState:
             "worker_id": self.worker_id,
             "stages": [stage.value for stage in self.stages],
             "batch_size": self.batch_size,
+            "claim_mode": self.claim_mode,
             "active_job_ids": self.active_job_ids,
             "processed": self.processed,
             "failures": self.failures,
@@ -78,7 +80,14 @@ class WorkerManager:
         await self.context.models.warmup()
         for idx in range(self.context.settings.download_workers):
             self._start_worker(f"download-{idx}", [JobStage.DOWNLOAD], self.context.settings.download_batch_size)
-        self._start_worker("gpu-0", [JobStage.PROCESS, JobStage.ANALYZE], 1)
+        self._start_worker("gpu-0", [JobStage.ANALYZE, JobStage.PROCESS], 1, claim_mode="gpu")
+        for idx in range(self.context.settings.process_workers):
+            self._start_worker(
+                f"process-cpu-{idx}",
+                [JobStage.PROCESS],
+                self.context.settings.process_batch_size,
+                claim_mode="cpu_process",
+            )
         if self.context.settings.work_dir_cleanup_enabled:
             self._tasks.append(asyncio.create_task(self._cleanup_loop(), name="work-dir-cleanup"))
         if self._gpu_health_state["enabled"]:
@@ -96,19 +105,36 @@ class WorkerManager:
     def drain(self) -> None:
         self.accepting = False
 
-    def _start_worker(self, name: str, stages: list[JobStage], batch_size: int) -> None:
+    def _start_worker(
+        self,
+        name: str,
+        stages: list[JobStage],
+        batch_size: int,
+        *,
+        claim_mode: str = "stages",
+    ) -> None:
         worker_id = f"{socket.gethostname()}:{name}:{uuid.uuid4().hex[:8]}"
-        state = WorkerState(worker_id=worker_id, stages=stages, batch_size=max(1, batch_size))
+        state = WorkerState(
+            worker_id=worker_id,
+            stages=stages,
+            batch_size=max(1, batch_size),
+            claim_mode=claim_mode,
+        )
         self._states[worker_id] = state
         self._tasks.append(asyncio.create_task(self._worker_loop(state), name=name))
 
     async def _worker_loop(self, state: WorkerState) -> None:
         while not self._stop_event.is_set():
-            jobs = self.context.store.claim_batch(
-                state.stages,
-                state.worker_id,
-                limit=state.batch_size,
-            )
+            if state.claim_mode == "gpu":
+                jobs = self.context.store.claim_gpu_batch(state.worker_id, limit=state.batch_size)
+            elif state.claim_mode == "cpu_process":
+                jobs = self.context.store.claim_cpu_process_batch(state.worker_id, limit=state.batch_size)
+            else:
+                jobs = self.context.store.claim_batch(
+                    state.stages,
+                    state.worker_id,
+                    limit=state.batch_size,
+                )
             if not jobs:
                 await asyncio.sleep(self.context.settings.worker_poll_seconds)
                 continue
@@ -234,6 +260,7 @@ class WorkerManager:
                 "download_batch_size": self.context.settings.download_batch_size,
                 "gpu_batch_size": 1,
                 "gpu_stages": [JobStage.PROCESS.value, JobStage.ANALYZE.value],
+                "process_cpu_batch_size": self.context.settings.process_batch_size,
                 "claim_order": ["priority_desc", "created_at_asc"],
                 "stages": [stage.value for stage in JobStage],
             },

@@ -251,6 +251,49 @@ class JobStore:
         if not stage_list or limit <= 0:
             return []
         placeholders = ",".join("?" for _ in stage_list)
+        return self._claim_where(
+            f"stage IN ({placeholders})",
+            tuple(stage_list),
+            worker_id=worker_id,
+            limit=limit,
+        )
+
+    def claim_cpu_process_batch(self, worker_id: str, *, limit: int) -> list[JobRecord]:
+        if limit <= 0:
+            return []
+        return self._claim_where(
+            "stage = ? AND COALESCE(json_extract(artifacts_json, '$.requires_gpu'), 1) = 0",
+            (JobStage.PROCESS.value,),
+            worker_id=worker_id,
+            limit=limit,
+        )
+
+    def claim_gpu_batch(self, worker_id: str, *, limit: int) -> list[JobRecord]:
+        if limit <= 0:
+            return []
+        return self._claim_where(
+            """
+            (
+                stage = ?
+                OR (
+                    stage = ?
+                    AND COALESCE(json_extract(artifacts_json, '$.requires_gpu'), 1) != 0
+                )
+            )
+            """,
+            (JobStage.ANALYZE.value, JobStage.PROCESS.value),
+            worker_id=worker_id,
+            limit=limit,
+        )
+
+    def _claim_where(
+        self,
+        extra_where: str,
+        extra_params: tuple[Any, ...],
+        *,
+        worker_id: str,
+        limit: int,
+    ) -> list[JobRecord]:
         now = time.time()
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -258,14 +301,14 @@ class JobStore:
                 f"""
                 SELECT * FROM jobs
                 WHERE status = ?
-                  AND stage IN ({placeholders})
                   AND available_at <= ?
+                  AND {extra_where}
                 ORDER BY priority DESC,
                          created_at ASC,
                          id ASC
                 LIMIT ?
                 """,
-                (JobStatus.QUEUED.value, *stage_list, now, limit),
+                (JobStatus.QUEUED.value, now, *extra_params, limit),
             ).fetchall()
             if not rows:
                 conn.execute("COMMIT")
