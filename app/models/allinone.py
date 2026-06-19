@@ -113,7 +113,8 @@ class AllInOneRuntime:
         demix_paths = []
         for path in paths:
             path = Path(path)
-            out_dir = demix_dir / "htdemucs" / path.stem
+            demucs_model = _demucs_model_name()
+            out_dir = demix_dir / demucs_model / path.stem
             demix_paths.append(out_dir)
             if out_dir.is_dir() and all((out_dir / f"{stem}.wav").is_file() for stem in _DEMUCS_STEMS):
                 continue
@@ -131,13 +132,13 @@ class AllInOneRuntime:
             "--out",
             demix_dir.as_posix(),
             "--name",
-            "htdemucs",
+            _demucs_model_name(),
             "--device",
             str(device),
             "--repo",
             (demix_dir.parent / "static_models").resolve().as_posix(),
             "-n",
-            "htdemucs",
+            _demucs_model_name(),
         ]
         segment_seconds = os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5").strip()
         if segment_seconds:
@@ -186,6 +187,7 @@ class AllInOneRuntime:
                 "target_audio_seconds": self.cuda_graph_audio_seconds,
             },
             "demucs": {
+                "model": _demucs_model_name(),
                 "segment_seconds": os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5"),
                 "jobs": os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0"),
             },
@@ -193,3 +195,7 @@ class AllInOneRuntime:
 
 
 _DEMUCS_STEMS = ("bass", "drums", "other", "vocals")
+
+
+def _demucs_model_name() -> str:
+    return os.getenv("ALL_IN_ONE_DEMUCS_MODEL", os.getenv("HTDEMUCS_MODEL", "htdemucs_ft")).strip() or "htdemucs_ft"

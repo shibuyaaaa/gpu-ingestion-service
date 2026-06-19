@@ -44,6 +44,7 @@ def test_memory_bounded_demix_adds_segment_limit(tmp_path, monkeypatch):
     audio_path.write_bytes(b"audio")
     demix_dir = tmp_path / "demix"
     captured = {}
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs_ft")
 
     def fake_run(cmd, check):
         captured["cmd"] = cmd
@@ -54,8 +55,10 @@ def test_memory_bounded_demix_adds_segment_limit(tmp_path, monkeypatch):
 
     demix_paths = AllInOneRuntime._memory_bounded_demix([audio_path], demix_dir, "cuda:0")
 
-    assert demix_paths == [demix_dir / "htdemucs" / "input"]
+    assert demix_paths == [demix_dir / "htdemucs_ft" / "input"]
     assert captured["check"] is True
+    assert captured["cmd"][captured["cmd"].index("--name") + 1] == "htdemucs_ft"
+    assert captured["cmd"][captured["cmd"].index("-n") + 1] == "htdemucs_ft"
     assert "--segment" in captured["cmd"]
     assert captured["cmd"][captured["cmd"].index("--segment") + 1] == "5"
     assert "--jobs" in captured["cmd"]

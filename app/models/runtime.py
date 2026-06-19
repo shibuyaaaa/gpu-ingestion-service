@@ -40,6 +40,9 @@ class ModelRuntimeBundle:
                 api_key=settings.all_in_one_api_key,
                 timeout_seconds=settings.all_in_one_timeout_seconds,
                 id_token_audience=settings.all_in_one_id_token_audience,
+                upload_transcode_enabled=settings.cloud_run_upload_transcode_enabled,
+                max_upload_bytes=settings.cloud_run_max_upload_bytes,
+                upload_bitrate=settings.cloud_run_upload_bitrate,
             )
             return cls(
                 all_in_one=cloud_runtime,

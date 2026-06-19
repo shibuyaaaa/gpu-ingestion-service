@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,9 @@ class CloudRunAllInOneRuntime:
         api_key: str = "",
         timeout_seconds: float = 1800.0,
         id_token_audience: str = "",
+        upload_transcode_enabled: bool = True,
+        max_upload_bytes: int = 24_000_000,
+        upload_bitrate: str = "320k",
     ):
         self.url = url.rstrip("/")
         self.model_name = model_name
@@ -28,6 +32,9 @@ class CloudRunAllInOneRuntime:
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.id_token_audience = id_token_audience.strip()
+        self.upload_transcode_enabled = upload_transcode_enabled
+        self.max_upload_bytes = max_upload_bytes
+        self.upload_bitrate = upload_bitrate
         self.loaded = False
         self.dry_run = False
 
@@ -84,23 +91,84 @@ class CloudRunAllInOneRuntime:
             "include_embeddings": "false",
             "include_activations": "false",
         }
-        path = Path(audio_path)
-        with path.open("rb") as audio_file:
-            files = {
-                "music_input": (
-                    path.name,
-                    audio_file,
-                    "application/octet-stream",
-                )
-            }
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(f"{self.url}/predict", data=data, files=files, headers=headers)
+        source_path = Path(audio_path)
+        upload_path, cleanup_path = await self._upload_path(source_path)
+        try:
+            with upload_path.open("rb") as audio_file:
+                files = {
+                    "music_input": (
+                        upload_path.name,
+                        audio_file,
+                        self._content_type(upload_path),
+                    )
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    response = await client.post(f"{self.url}/predict", data=data, files=files, headers=headers)
+        finally:
+            if cleanup_path is not None:
+                cleanup_path.unlink(missing_ok=True)
         if response.status_code >= 400:
             raise RuntimeError(f"Cloud Run all-in-one failed: HTTP {response.status_code}: {response.text[:1000]}")
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("Cloud Run all-in-one returned a non-object response")
         return payload
+
+    async def _upload_path(self, path: Path) -> tuple[Path, Path | None]:
+        if not self.upload_transcode_enabled:
+            return path, None
+        if path.stat().st_size <= self.max_upload_bytes:
+            return path, None
+        target = path.with_name(f"{path.stem}.cloudrun-upload.mp3")
+        await self._transcode_for_upload(path, target)
+        return target, target
+
+    async def _transcode_for_upload(self, source: Path, target: Path) -> None:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            self.upload_bitrate,
+            str(target),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(stderr.decode("utf-8", errors="replace")[-1000:])
+
+        # Keep a final guard because Cloud Run rejects oversized multipart bodies before app code runs.
+        if target.stat().st_size > self.max_upload_bytes:
+            lower_bitrate = os.getenv("CLOUD_RUN_UPLOAD_FALLBACK_BITRATE", "192k").strip() or "192k"
+            if lower_bitrate == self.upload_bitrate:
+                raise RuntimeError(f"transcoded upload is still too large: {target.stat().st_size} bytes")
+            cmd[cmd.index(self.upload_bitrate)] = lower_bitrate
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(stderr.decode("utf-8", errors="replace")[-1000:])
+            if target.stat().st_size > self.max_upload_bytes:
+                raise RuntimeError(f"transcoded upload is still too large: {target.stat().st_size} bytes")
+
+    @staticmethod
+    def _content_type(path: Path) -> str:
+        if path.suffix.lower() == ".mp3":
+            return "audio/mpeg"
+        if path.suffix.lower() in {".wav", ".wave"}:
+            return "audio/wav"
+        return "application/octet-stream"
 
     def _headers(self) -> dict[str, str]:
         if self.auth in {"", "none"}:
@@ -167,4 +235,9 @@ class CloudRunAllInOneRuntime:
             "resident_policy": "remote-cloud-run-gpu",
             "audio_separator_model": self.audio_separator_model,
             "auth": self.auth,
+            "upload": {
+                "transcode_enabled": self.upload_transcode_enabled,
+                "max_bytes": self.max_upload_bytes,
+                "bitrate": self.upload_bitrate,
+            },
         }
