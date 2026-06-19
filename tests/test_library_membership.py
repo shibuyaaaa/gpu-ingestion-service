@@ -354,3 +354,169 @@ async def test_segment_processing_publishes_chord_before_remaining_stems(monkeyp
         assert result["early_library_publish"]["status"] == "partial"
         assert result["stem_source"] == "all_in_one_full_song_stems"
         assert "stem_segment_extract_seconds" in result["timings"]
+
+
+async def test_full_stem_segment_extraction_runs_stems_concurrently(monkeypatch, tmp_path):
+    active = 0
+    max_active = 0
+
+    async def fake_extract_segment(source, target, *, start, duration):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        Path(target).write_bytes(b"segment")
+        active -= 1
+
+    monkeypatch.setattr("app.jobs.adapters.AudioOps.extract_segment", fake_extract_segment)
+
+    stems = await BulkDissectAdapter._extract_stem_segments(
+        {
+            "other": str(tmp_path / "other.wav"),
+            "vocals": str(tmp_path / "vocals.wav"),
+            "drums": str(tmp_path / "drums.wav"),
+        },
+        tmp_path / "segments",
+        {"id": "seg-1", "start": 0.0, "end": 8.0},
+    )
+
+    assert set(stems) == {"other", "vocals", "drums"}
+    assert max_active > 1
+
+
+async def test_other_stem_uploads_run_concurrently(monkeypatch, tmp_path):
+    active = 0
+    max_active = 0
+
+    class FakeGCS:
+        async def upload(self, local_path, gcs_path, *, content_type):
+            nonlocal active, max_active
+            if gcs_path.endswith(".mp3"):
+                active += 1
+                max_active = max(max_active, active)
+                await asyncio.sleep(0.01)
+                active -= 1
+            return f"https://cdn.test/{Path(gcs_path).name}"
+
+    class FakeWriter:
+        async def publish_segment(self, *, job, segment, segment_result, status):
+            return LibraryPublishResult(enabled=True, song_id="song-1", status=status)
+
+    paths = {}
+    for stem in ("vocals", "drums", "bass"):
+        path = tmp_path / f"{stem}.mp3"
+        path.write_bytes(b"mp3")
+        paths[stem] = str(path)
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+    )
+    store = JobStore(settings.queue_db_path)
+    job, _ = store.enqueue({"job_id": "parallel-upload", "job_type": "bulk_dissect", "source": "song"})
+    store.complete_stage(
+        job.id,
+        next_stage=JobStage.PROCESS,
+        artifacts={
+            "work_dir": str(tmp_path / "work" / "jobs" / job.id),
+            "audio_path": str(tmp_path / "source.wav"),
+            "stem_paths": paths,
+        },
+    )
+    job = store.get(job.id)
+    context = JobContext(
+        settings=settings,
+        store=store,
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=FakeWriter(),
+    )
+
+    result = await BulkDissectAdapter()._process_segment(
+        job,
+        context,
+        {"id": "seg-1", "start": 0.0, "end": 8.0, "label": "chorus"},
+        output_prefix="segments",
+        stem_group="other",
+    )
+
+    assert set(result["outputs"]) == {"vocals", "drums", "bass"}
+    assert max_active > 1
+
+
+async def test_chord_job_slices_only_chord_and_child_uses_full_stems(monkeypatch, tmp_path):
+    extracted_keys = []
+
+    async def fake_extract_stem_segments(full_stem_paths, output_dir, segment):
+        extracted_keys.append(set(full_stem_paths))
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        result = {}
+        for stem in full_stem_paths:
+            path = output / f"{stem}.mp3"
+            path.write_bytes(b"mp3")
+            result[stem] = str(path)
+        return result
+
+    class FakeGCS:
+        async def upload(self, local_path, gcs_path, *, content_type):
+            return f"https://cdn.test/{Path(gcs_path).name}"
+
+    class FakeWriter:
+        async def publish_segment(self, *, job, segment, segment_result, status):
+            return LibraryPublishResult(enabled=True, song_id="song-1", status=status)
+
+    monkeypatch.setattr(BulkDissectAdapter, "_extract_stem_segments", staticmethod(fake_extract_stem_segments))
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+    )
+    store = JobStore(settings.queue_db_path)
+    job, _ = store.enqueue({"job_id": "chord-only", "job_type": "bulk_dissect", "source": "song"})
+    store.complete_stage(
+        job.id,
+        next_stage=JobStage.PROCESS,
+        artifacts={
+            "work_dir": str(tmp_path / "work" / "jobs" / job.id),
+            "audio_path": str(tmp_path / "source.wav"),
+            "full_stem_paths": {
+                "other": str(tmp_path / "other.wav"),
+                "vocals": str(tmp_path / "vocals.wav"),
+                "drums": str(tmp_path / "drums.wav"),
+            },
+            "process_group": "bulk",
+            "root_job_id": job.id,
+        },
+    )
+    job = store.get(job.id)
+    context = JobContext(
+        settings=settings,
+        store=store,
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=FakeWriter(),
+    )
+
+    segment = {"id": "seg-1", "start": 0.0, "end": 8.0, "label": "chorus"}
+    adapter = BulkDissectAdapter()
+    result = await adapter._process_segment(
+        job,
+        context,
+        segment,
+        output_prefix="segments",
+        stem_group="chord",
+    )
+    other_job = adapter._enqueue_other_stems_job(job, context, segment, result)
+
+    assert extracted_keys == [{"other"}]
+    assert set(result["outputs"]) == {"other"}
+    assert other_job is not None
+    assert other_job.artifacts["stem_paths"] == {}
+    assert set(other_job.artifacts["full_stem_paths"]) == {"other", "vocals", "drums"}

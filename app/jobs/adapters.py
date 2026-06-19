@@ -277,7 +277,8 @@ class DissectAdapter(JobAdapter):
         else:
             if can_slice_full_stems:
                 started = time.perf_counter()
-                stems = await self._extract_stem_segments(full_stem_paths, stems_dir, segment)
+                stems_to_extract = dict(_filter_stems(full_stem_paths, stem_group))
+                stems = await self._extract_stem_segments(stems_to_extract, stems_dir, segment)
                 timings["stem_segment_extract_seconds"] = round(time.perf_counter() - started, 6)
                 stem_source = "all_in_one_full_song_stems"
             else:
@@ -306,15 +307,18 @@ class DissectAdapter(JobAdapter):
             chord_published = False
             early_library_publish = None
             upload_started = time.perf_counter()
-            for stem, path in _ordered_upload_stems(selected_stems):
-                local_path = Path(path)
-                if local_path.suffix.lower() != ".mp3":
-                    mp3_path = local_path.with_suffix(".mp3")
-                    await AudioOps.convert_to_mp3(local_path, mp3_path)
-                    local_path = mp3_path
-                gcs_path = f"gpu-ingestion/{job.id}/segments/{segment_id}/{stem}.mp3"
-                uploaded[stem] = await context.gcs.upload(local_path, gcs_path, content_type="audio/mpeg")
-                if not chord_published and _canonical_stem_type(stem) == "chord":
+            ordered_stems = _ordered_upload_stems(selected_stems)
+            chord_items = [(stem, path) for stem, path in ordered_stems if _canonical_stem_type(stem) == "chord"]
+            other_items = [(stem, path) for stem, path in ordered_stems if _canonical_stem_type(stem) != "chord"]
+            for stem, path in chord_items:
+                uploaded[stem] = await self._prepare_and_upload_stem(
+                    stem=stem,
+                    path=path,
+                    job_id=job.id,
+                    segment_id=segment_id,
+                    context=context,
+                )
+                if not chord_published:
                     chord_result = {
                         "segment": segment,
                         "segment_path": str(segment_path) if segment_path else None,
@@ -330,6 +334,19 @@ class DissectAdapter(JobAdapter):
                     early_library_publish = chord_publish.to_dict()
                     _ensure_library_publish_ok(early_library_publish)
                     chord_published = True
+            other_uploads = await asyncio.gather(
+                *(
+                    self._prepare_and_upload_stem(
+                        stem=stem,
+                        path=path,
+                        job_id=job.id,
+                        segment_id=segment_id,
+                        context=context,
+                    )
+                    for stem, path in other_items
+                )
+            )
+            uploaded.update((stem, url) for (stem, _), url in zip(other_items, other_uploads, strict=True))
             timings["upload_and_publish_seconds"] = round(time.perf_counter() - upload_started, 6)
             manifest_url = await _upload_segment_manifest(
                 job=job,
@@ -352,6 +369,23 @@ class DissectAdapter(JobAdapter):
             "early_library_publish": early_library_publish if not context.settings.dry_run_mode else None,
             "manifest_url": manifest_url,
         }
+
+    @staticmethod
+    async def _prepare_and_upload_stem(
+        *,
+        stem: str,
+        path: str,
+        job_id: str,
+        segment_id: str,
+        context: JobContext,
+    ) -> str:
+        local_path = Path(path)
+        if local_path.suffix.lower() != ".mp3":
+            mp3_path = local_path.with_suffix(".mp3")
+            await AudioOps.convert_to_mp3(local_path, mp3_path)
+            local_path = mp3_path
+        gcs_path = f"gpu-ingestion/{job_id}/segments/{segment_id}/{stem}.mp3"
+        return await context.gcs.upload(local_path, gcs_path, content_type="audio/mpeg")
 
     async def _process_fanout_job(self, job: JobRecord, context: JobContext) -> StageResult:
         process_mode = job.artifacts.get("process_mode")
@@ -469,6 +503,10 @@ class DissectAdapter(JobAdapter):
         chord_result: dict[str, Any],
     ) -> JobRecord | None:
         other_stems = dict(_filter_stems(chord_result.get("stem_paths") or {}, "other"))
+        use_full_stems = False
+        if not other_stems and job.artifacts.get("full_stem_paths") and not context.settings.dry_run_mode:
+            other_stems = dict(_filter_stems(job.artifacts.get("full_stem_paths") or {}, "other"))
+            use_full_stems = True
         if not other_stems:
             return None
 
@@ -502,7 +540,7 @@ class DissectAdapter(JobAdapter):
                 "segment_id": str(segment["id"]),
                 "segment": segment,
                 "segment_path": chord_result.get("segment_path"),
-                "stem_paths": chord_result.get("stem_paths") or {},
+                "stem_paths": {} if use_full_stems else chord_result.get("stem_paths") or {},
                 "chord_outputs": chord_result.get("outputs") or {},
                 "requires_gpu": False,
             },
@@ -535,12 +573,15 @@ class DissectAdapter(JobAdapter):
     ) -> dict[str, str]:
         output_dir.mkdir(parents=True, exist_ok=True)
         duration = max(0.1, float(segment["end"]) - float(segment["start"]))
-        outputs: dict[str, str] = {}
-        for stem, full_path in full_stem_paths.items():
+        ordered_stems = list(full_stem_paths.items())
+
+        async def extract_one(stem: str, full_path: str) -> tuple[str, str]:
             target = output_dir / f"{stem}.mp3"
             await AudioOps.extract_segment(full_path, target, start=float(segment["start"]), duration=duration)
-            outputs[stem] = str(target)
-        return outputs
+            return stem, str(target)
+
+        pairs = await asyncio.gather(*(extract_one(stem, full_path) for stem, full_path in ordered_stems))
+        return dict(pairs)
 
     @staticmethod
     def _source_from_payload(payload: dict) -> str:
