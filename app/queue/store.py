@@ -11,7 +11,7 @@ from app.queue.types import JobEventType, JobStage, JobStatus, JobType
 
 
 DEFAULT_JOB_PRIORITIES = {
-    JobType.QUICK_DISSECT: 100,
+    JobType.QUICK_DISSECT: 350,
     JobType.BULK_DISSECT: 10,
 }
 

@@ -156,7 +156,7 @@ def test_quick_process_job_preempts_bulk_process_backlog_after_current_claim():
 
         assert next_claim is not None
         assert next_claim.id == "quick-late"
-        assert next_claim.priority == 100
+        assert next_claim.priority == 350
         assert store.get("bulk-1").status == JobStatus.QUEUED
 
 
@@ -174,13 +174,47 @@ def test_claim_batch_is_fifo_for_same_priority_across_stages():
         assert [job.id for job in claimed] == ["analysis-job", "process-job"]
 
 
+def test_gpu_claim_order_prioritizes_quick_work_over_bulk_analysis():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        bulk, _ = store.enqueue({"job_id": "bulk", "job_type": "bulk_dissect", "source": "song"})
+        quick, _ = store.enqueue({"job_id": "quick", "job_type": "quick_dissect", "source": "song"})
+        store.complete_stage(bulk.id, next_stage=JobStage.ANALYZE)
+        store.complete_stage(quick.id, next_stage=JobStage.ANALYZE)
+
+        claimed = store.claim_batch([JobStage.PROCESS, JobStage.ANALYZE], "gpu-worker", limit=2)
+
+        assert [job.id for job in claimed] == ["quick", "bulk"]
+        assert claimed[0].priority > PROCESS_PRIORITY_BULK_CHORD
+
+
+def test_gpu_claim_order_prioritizes_quick_chord_over_bulk_analysis():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        bulk, _ = store.enqueue({"job_id": "bulk", "job_type": "bulk_dissect", "source": "song"})
+        quick, _ = store.enqueue({"job_id": "quick", "job_type": "quick_dissect", "source": "song"})
+        store.complete_stage(bulk.id, next_stage=JobStage.ANALYZE)
+        store.enqueue_process_child(
+            parent_job=quick,
+            child_id="quick:quick:seg-1:chord",
+            job_type=JobType.QUICK_DISSECT,
+            payload={"source": "song", "root_job_id": "quick"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-1"},
+            priority=PROCESS_PRIORITY_QUICK_CHORD,
+        )
+
+        claimed = store.claim_batch([JobStage.PROCESS, JobStage.ANALYZE], "gpu-worker", limit=2)
+
+        assert [job.id for job in claimed] == ["quick:quick:seg-1:chord", "bulk"]
+
+
 def test_job_type_default_priorities_are_applied():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
         quick, _ = store.enqueue({"job_id": "quick", "job_type": "quick_dissect", "source": "song"})
         bulk, _ = store.enqueue({"job_id": "bulk", "job_type": "bulk_dissect", "source": "song"})
 
-        assert quick.priority == 100
+        assert quick.priority == 350
         assert bulk.priority == 10
 
 

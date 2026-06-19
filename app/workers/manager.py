@@ -78,13 +78,7 @@ class WorkerManager:
         await self.context.models.warmup()
         for idx in range(self.context.settings.download_workers):
             self._start_worker(f"download-{idx}", [JobStage.DOWNLOAD], self.context.settings.download_batch_size)
-        self._start_worker("analyze-0", [JobStage.ANALYZE], self.context.settings.analyze_batch_size)
-        for idx in range(self.context.settings.process_workers):
-            self._start_worker(
-                f"process-{idx}",
-                [JobStage.PROCESS],
-                self.context.settings.process_batch_size,
-            )
+        self._start_worker("gpu-0", [JobStage.PROCESS, JobStage.ANALYZE], 1)
         if self.context.settings.work_dir_cleanup_enabled:
             self._tasks.append(asyncio.create_task(self._cleanup_loop(), name="work-dir-cleanup"))
         if self._gpu_health_state["enabled"]:
@@ -238,8 +232,8 @@ class WorkerManager:
             "gpu_health": self._gpu_health_state,
             "scheduling": {
                 "download_batch_size": self.context.settings.download_batch_size,
-                "analyze_batch_size": self.context.settings.analyze_batch_size,
-                "process_batch_size": self.context.settings.process_batch_size,
+                "gpu_batch_size": 1,
+                "gpu_stages": [JobStage.PROCESS.value, JobStage.ANALYZE.value],
                 "claim_order": ["priority_desc", "created_at_asc"],
                 "stages": [stage.value for stage in JobStage],
             },
