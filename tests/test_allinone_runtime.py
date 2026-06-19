@@ -49,6 +49,10 @@ def test_allinone_analysis_uses_fresh_byproducts_and_overwrite(tmp_path, monkeyp
         "other": str(demix_dir / "other.wav"),
         "vocals": str(demix_dir / "vocals.wav"),
     }
+    assert result["timings"]["dry_run"] is False
+    assert result["timings"]["allin1_analyze_seconds"] >= 0
+    assert result["timings"]["stem_count"] == 4
+    assert runtime.status()["last_timings"] == result["timings"]
 
 
 def test_find_demix_stems_returns_only_existing_stems(tmp_path, monkeypatch):
@@ -81,8 +85,13 @@ def test_memory_bounded_demix_adds_segment_limit(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(allinone_module.subprocess, "run", fake_run)
+    allinone_module._ANALYZE_LOCAL.timings = {}
 
-    demix_paths = AllInOneRuntime._memory_bounded_demix([audio_path], demix_dir, "cuda:0")
+    try:
+        demix_paths = AllInOneRuntime._memory_bounded_demix([audio_path], demix_dir, "cuda:0")
+        timings = dict(allinone_module._ANALYZE_LOCAL.timings)
+    finally:
+        allinone_module._ANALYZE_LOCAL.timings = None
 
     assert demix_paths == [demix_dir / "htdemucs_ft" / "input"]
     assert captured["check"] is True
@@ -93,6 +102,9 @@ def test_memory_bounded_demix_adds_segment_limit(tmp_path, monkeypatch):
     assert captured["cmd"][captured["cmd"].index("--segment") + 1] == "5"
     assert "--jobs" in captured["cmd"]
     assert captured["cmd"][captured["cmd"].index("--jobs") + 1] == "0"
+    assert timings["demix_backend"] == "cli"
+    assert timings["demix_pending_tracks"] == 1
+    assert timings["demix_cli_seconds"] >= 0
 
 
 def test_memory_bounded_demix_uses_static_repo_when_model_yaml_exists(tmp_path, monkeypatch):

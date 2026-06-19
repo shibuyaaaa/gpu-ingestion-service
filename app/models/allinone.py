@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ class AllInOneRuntime:
         self.cuda_graph_audio_seconds = cuda_graph_audio_seconds
         self.loaded = False
         self._allin1: Any = None
+        self._last_timings: dict[str, Any] = {}
 
     async def load(self) -> None:
         if self.loaded:
@@ -65,41 +67,65 @@ class AllInOneRuntime:
         }
         target = output_dir / "analyzer_result.json"
         target.write_text(json.dumps(analysis), encoding="utf-8")
-        return {"analysis": analysis, "analyzer_result_path": str(target)}
+        timings = {"allin1_analyze_seconds": 0.0, "dry_run": True}
+        self._last_timings = timings
+        return {"analysis": analysis, "analyzer_result_path": str(target), "timings": timings}
 
     def _analyze_sync(self, audio_path: Path, output_dir: Path) -> dict[str, Any]:
         if self._allin1 is None:
             raise RuntimeError("all-in-one runtime is not loaded")
+        timings: dict[str, Any] = {"dry_run": False}
+        _ANALYZE_LOCAL.timings = timings
         byproduct_root = output_dir / "byproducts"
-        if byproduct_root.exists():
-            shutil.rmtree(byproduct_root)
-        byproduct_root.mkdir(parents=True, exist_ok=True)
-        self._ensure_static_models_link(byproduct_root)
-        result = self._allin1.analyze(
-            paths=[str(audio_path)],
-            out_dir=str(output_dir),
-            model=self.model_name,
-            device=self.device,
-            visualize=False,
-            sonify=False,
-            include_activations=False,
-            include_embeddings=False,
-            demix_dir=str(byproduct_root / "demix"),
-            spec_dir=str(byproduct_root / "spec"),
-            keep_byproducts=True,
-            overwrite=True,
-        )
-        analysis_path = self._find_analysis_json(output_dir)
-        analysis: dict[str, Any] = {}
-        if analysis_path:
-            analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
-        stem_paths = self._find_demix_stems(byproduct_root, audio_path)
-        return {
-            "analysis": analysis,
-            "analyzer_result_path": str(analysis_path) if analysis_path else None,
-            "stem_paths": stem_paths,
-            "raw_result": str(result),
-        }
+        try:
+            started = time.perf_counter()
+            if byproduct_root.exists():
+                shutil.rmtree(byproduct_root)
+            byproduct_root.mkdir(parents=True, exist_ok=True)
+            self._ensure_static_models_link(byproduct_root)
+            timings["byproduct_setup_seconds"] = _elapsed(started)
+
+            started = time.perf_counter()
+            result = self._allin1.analyze(
+                paths=[str(audio_path)],
+                out_dir=str(output_dir),
+                model=self.model_name,
+                device=self.device,
+                visualize=False,
+                sonify=False,
+                include_activations=False,
+                include_embeddings=False,
+                demix_dir=str(byproduct_root / "demix"),
+                spec_dir=str(byproduct_root / "spec"),
+                keep_byproducts=True,
+                overwrite=True,
+            )
+            timings["allin1_analyze_seconds"] = _elapsed(started)
+
+            started = time.perf_counter()
+            analysis_path = self._find_analysis_json(output_dir)
+            timings["find_analysis_json_seconds"] = _elapsed(started)
+
+            started = time.perf_counter()
+            analysis: dict[str, Any] = {}
+            if analysis_path:
+                analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+            timings["load_analysis_json_seconds"] = _elapsed(started)
+
+            started = time.perf_counter()
+            stem_paths = self._find_demix_stems(byproduct_root, audio_path)
+            timings["find_demix_stems_seconds"] = _elapsed(started)
+            timings["stem_count"] = len(stem_paths)
+            self._last_timings = dict(timings)
+            return {
+                "analysis": analysis,
+                "analyzer_result_path": str(analysis_path) if analysis_path else None,
+                "stem_paths": stem_paths,
+                "raw_result": str(result),
+                "timings": dict(timings),
+            }
+        finally:
+            _ANALYZE_LOCAL.timings = None
 
     def _patch_allin1_demix(self) -> None:
         if self._allin1 is None:
@@ -112,6 +138,7 @@ class AllInOneRuntime:
     @staticmethod
     def _memory_bounded_demix(paths: list[Path], demix_dir: Path, device: Any) -> list[Path]:
         """Drop-in all-in-one Demucs hook with resident weights for L4 VMs."""
+        timings = getattr(_ANALYZE_LOCAL, "timings", None)
         todos = []
         demix_paths = []
         for path in paths:
@@ -125,16 +152,31 @@ class AllInOneRuntime:
 
         existing = len(paths) - len(todos)
         print(f"=> Found {existing} tracks already demixed, {len(todos)} to demix.")
+        if isinstance(timings, dict):
+            timings["demix_existing_tracks"] = existing
+            timings["demix_pending_tracks"] = len(todos)
         if not todos:
             return demix_paths
 
         demucs_model = _demucs_model_name()
         static_models_dir = (demix_dir.parent / "static_models").resolve()
+        started = time.perf_counter()
         if _demucs_backend() == "cli":
-            _run_demucs_cli(todos, demix_dir, device, demucs_model, static_models_dir)
+            demix_timings = _run_demucs_cli(todos, demix_dir, device, demucs_model, static_models_dir)
+            backend = "cli"
+            if isinstance(timings, dict):
+                timings["demix_total_seconds"] = _elapsed(started)
+                timings["demix_backend"] = backend
+                if isinstance(demix_timings, dict):
+                    timings.update(demix_timings)
             return demix_paths
 
-        _run_demucs_resident(todos, demix_dir, device, demucs_model, static_models_dir)
+        demix_timings = _run_demucs_resident(todos, demix_dir, device, demucs_model, static_models_dir)
+        if isinstance(timings, dict):
+            timings["demix_total_seconds"] = _elapsed(started)
+            timings["demix_backend"] = "resident"
+            if isinstance(demix_timings, dict):
+                timings.update(demix_timings)
         return demix_paths
 
     @staticmethod
@@ -190,10 +232,11 @@ class AllInOneRuntime:
                 "jobs": os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0"),
                 "resident_cache_keys": list(_DEMUCS_MODEL_CACHE.keys()),
             },
+            "last_timings": self._last_timings,
         }
 
 
-def _run_demucs_cli(paths: list[Path], demix_dir: Path, device: Any, demucs_model: str, static_models_dir: Path) -> None:
+def _run_demucs_cli(paths: list[Path], demix_dir: Path, device: Any, demucs_model: str, static_models_dir: Path) -> dict[str, Any]:
     cmd = [
         sys.executable,
         "-m",
@@ -216,15 +259,31 @@ def _run_demucs_cli(paths: list[Path], demix_dir: Path, device: Any, demucs_mode
     if jobs:
         cmd.extend(["--jobs", jobs])
     cmd.extend(path.as_posix() for path in paths)
+    started = time.perf_counter()
     subprocess.run(cmd, check=True)
+    return {
+        "demix_cli_seconds": _elapsed(started),
+        "demix_track_count": len(paths),
+    }
 
 
-def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs_model: str, static_models_dir: Path) -> None:
+def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs_model: str, static_models_dir: Path) -> dict[str, Any]:
     import torch
     from demucs.apply import apply_model
     from demucs.audio import AudioFile, save_audio
 
+    timings: dict[str, Any] = {
+        "demix_track_count": len(paths),
+        "demix_audio_read_seconds": 0.0,
+        "demix_normalize_seconds": 0.0,
+        "demix_pin_seconds": 0.0,
+        "demix_transfer_seconds": 0.0,
+        "demix_apply_seconds": 0.0,
+        "demix_save_seconds": 0.0,
+    }
+    started = time.perf_counter()
     model = _resident_demucs_model(demucs_model, device, static_models_dir)
+    timings["demix_model_ready_seconds"] = _elapsed(started)
     torch_device = torch.device(device)
     segment = _optional_float_env("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS")
     jobs = _int_env("ALL_IN_ONE_DEMUCS_JOBS", 0)
@@ -232,18 +291,27 @@ def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs
         path = Path(path)
         out_dir = demix_dir / demucs_model / path.stem
         out_dir.mkdir(parents=True, exist_ok=True)
+        started = time.perf_counter()
         wav = AudioFile(str(path)).read(
             streams=0,
             samplerate=model.samplerate,
             channels=model.audio_channels,
         )
+        timings["demix_audio_read_seconds"] += _elapsed(started)
+        started = time.perf_counter()
         ref = wav.mean(0)
         wav = (wav - ref.mean()) / ref.std()
         batch = wav[None]
+        timings["demix_normalize_seconds"] += _elapsed(started)
         if _bool_env("ALL_IN_ONE_DEMUCS_PIN_MEMORY", True):
+            started = time.perf_counter()
             batch = _maybe_pin(batch)
+            timings["demix_pin_seconds"] += _elapsed(started)
         with torch.inference_mode():
+            started = time.perf_counter()
             device_batch = _transfer_to_device(batch, torch_device)
+            timings["demix_transfer_seconds"] += _elapsed(started)
+            started = time.perf_counter()
             sources = apply_model(
                 model,
                 device_batch,
@@ -254,9 +322,15 @@ def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs
                 num_workers=jobs,
                 progress=False,
             )[0]
+            if torch_device.type == "cuda":
+                torch.cuda.synchronize(torch_device)
+            timings["demix_apply_seconds"] += _elapsed(started)
             sources = sources * ref.std() + ref.mean()
+        started = time.perf_counter()
         for source, name in zip(sources, model.sources):
             save_audio(source.cpu(), str(out_dir / f"{name}.wav"), samplerate=model.samplerate)
+        timings["demix_save_seconds"] += _elapsed(started)
+    return {key: _round_timing(value) if isinstance(value, float) else value for key, value in timings.items()}
 
 
 def _resident_demucs_model(model_name: str, device: Any, static_models_dir: Path) -> Any:
@@ -289,6 +363,15 @@ def _resident_demucs_model(model_name: str, device: Any, static_models_dir: Path
 _DEMUCS_STEMS = ("bass", "drums", "other", "vocals")
 _DEMUCS_MODEL_CACHE: dict[str, Any] = {}
 _DEMUCS_MODEL_LOCK = threading.RLock()
+_ANALYZE_LOCAL = threading.local()
+
+
+def _elapsed(started: float) -> float:
+    return _round_timing(time.perf_counter() - started)
+
+
+def _round_timing(value: float) -> float:
+    return round(float(value), 6)
 
 
 def _demucs_model_name() -> str:

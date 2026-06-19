@@ -116,6 +116,7 @@ class DissectAdapter(JobAdapter):
             full_stem_paths = await self._download_full_stems(full_stem_urls, Path(job.artifacts["work_dir"]))
         artifacts = {
             "analysis": analysis,
+            "analysis_timings": result.get("timings") or {},
             "analyzer_result_path": result.get("analyzer_result_path"),
             "analyzer_result_url": result.get("analyzer_result_url"),
             "full_stem_urls": full_stem_urls,
