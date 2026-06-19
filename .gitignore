@@ -10,3 +10,6 @@ tmp/
 /models/
 dist/
 build/
+docs/reports/*.csv
+docs/reports/*.json
+docs/reports/*.jsonl

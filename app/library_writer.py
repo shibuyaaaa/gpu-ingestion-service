@@ -130,14 +130,16 @@ class LibraryWriter:
             return str(existing["id"])
 
         analysis = job.artifacts.get("analysis") or {}
+        mix_id = await self._next_mix_id(conn)
         row = await conn.fetchrow(
             """
             INSERT INTO songs (
                 title, cover_art_url, all_in_one_bpm, beat_analysis_bpm, key,
                 audio_url, genre, youtube_url, analysis_json,
-                cover_art_square_lowres, cover_art_square_medres, cover_art_square_highres
+                cover_art_square_lowres, cover_art_square_medres, cover_art_square_highres,
+                mix_id
             )
-            VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12)
             RETURNING id
             """,
             title,
@@ -151,6 +153,7 @@ class LibraryWriter:
             metadata.get("album_art_lowres") or metadata.get("album_art_url"),
             metadata.get("album_art_medres") or metadata.get("album_art_url"),
             metadata.get("album_art_highres") or metadata.get("album_art_url"),
+            mix_id,
         )
         song_id = str(row["id"])
         for index, artist_name in enumerate(artists or [primary_artist]):
@@ -217,6 +220,11 @@ class LibraryWriter:
             song_id,
         )
         return str(row["artist_id"]) if row else None
+
+    async def _next_mix_id(self, conn: Any) -> int:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('gpu_ingestion_mix_id'))")
+        value = await conn.fetchval("SELECT COALESCE(MAX(mix_id), 99999) + 1 FROM songs")
+        return int(value)
 
     async def _upsert_stem(
         self,
