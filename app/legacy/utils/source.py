@@ -156,6 +156,8 @@ async def download_http_file(url: str, output_path: str | Path) -> str:
 async def _spotify_track_from_source(source: str) -> dict[str, Any]:
     track_id = _extract_spotify_track_id(source)
     if track_id:
+        if os.getenv("SPOTIFY_TRACK_METADATA_SOURCE", "embed").strip().lower() == "embed":
+            return await _get_spotify_embed_track(track_id)
         track = await _get_spotify_track(track_id)
         return _format_spotify_track(track)
     tracks = await _search_spotify_tracks(source, limit=1)
@@ -211,6 +213,48 @@ async def _spotify_token() -> str:
 
 async def _get_spotify_track(track_id: str) -> dict[str, Any]:
     return await _spotify_get_json(f"https://api.spotify.com/v1/tracks/{track_id}")
+
+
+async def _get_spotify_embed_track(track_id: str) -> dict[str, Any]:
+    oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{track_id}"
+    embed_url = f"https://open.spotify.com/embed/track/{track_id}?utm_source=oembed"
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        oembed_response = await client.get(oembed_url)
+        oembed_response.raise_for_status()
+        oembed = oembed_response.json()
+        embed_response = await client.get(embed_url)
+        embed_response.raise_for_status()
+        embed_html = embed_response.text
+
+    artists = _artists_from_embed_html(embed_html)
+    title = str(oembed.get("title") or "").strip()
+    return {
+        "spotify_id": track_id,
+        "title": title or track_id,
+        "artist": artists[0] if artists else "",
+        "artists": artists,
+        "album": "",
+        "duration_ms": 0,
+        "album_art_url": oembed.get("thumbnail_url"),
+        "album_art_highres": oembed.get("thumbnail_url"),
+        "album_art_medres": oembed.get("thumbnail_url"),
+        "album_art_lowres": oembed.get("thumbnail_url"),
+        "isrc": None,
+        "popularity": 0,
+        "metadata_source": "spotify_embed",
+    }
+
+
+def _artists_from_embed_html(html: str) -> list[str]:
+    match = re.search(r'"artists":\[(?P<artists>.*?)\]', html)
+    if not match:
+        return []
+    try:
+        artists = json.loads(f"[{match.group('artists')}]")
+    except json.JSONDecodeError:
+        return []
+    names = [str(artist.get("name") or "").strip() for artist in artists if isinstance(artist, dict)]
+    return [name for name in names if name]
 
 
 async def _search_spotify_tracks(query: str, *, limit: int) -> list[dict[str, Any]]:

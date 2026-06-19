@@ -42,7 +42,14 @@ class DissectAdapter(JobAdapter):
                 "audio_path": str(source_path),
             }
         else:
-            resolved = await resolve_source_metadata(source)
+            payload_metadata = job.payload.get("spotify_metadata")
+            if isinstance(payload_metadata, dict) and payload_metadata.get("title"):
+                resolved = {
+                    "source": source,
+                    "spotify_metadata": payload_metadata,
+                }
+            else:
+                resolved = await resolve_source_metadata(source)
             library_result = await context.library.lookup(resolved.get("spotify_metadata"))
             if library_result.exists:
                 return StageResult(

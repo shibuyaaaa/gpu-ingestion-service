@@ -1,7 +1,7 @@
 import pytest
 
 from app.jobs.adapters import BulkDissectAdapter
-from app.legacy.utils.source import extract_youtube_video_id
+from app.legacy.utils.source import _artists_from_embed_html, extract_youtube_video_id
 
 
 def test_source_field_is_canonical_source():
@@ -38,6 +38,12 @@ def test_source_aliases_are_accepted(field):
 def test_source_is_required():
     with pytest.raises(RuntimeError):
         BulkDissectAdapter._source_from_payload({"local_path": "/tmp/song.wav"})
+
+
+def test_spotify_embed_artist_parser():
+    html = '"artists":[{"name":"Bello\\u0026Dallas","uri":"spotify:artist:2zW"}]'
+
+    assert _artists_from_embed_html(html) == ["Bello&Dallas"]
 
 
 def test_chorus_fallback_uses_longest_useful_segment():

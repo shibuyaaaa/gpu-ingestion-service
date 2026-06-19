@@ -206,6 +206,7 @@ def _payload_for_candidate(session_id: str, candidate: ChartCandidate) -> dict[s
         "crawler_source": "spotify_chart_playlist",
         "crawler_rank": candidate.rank,
         "crawler_popularity": candidate.popularity,
+        "spotify_metadata": candidate.to_metadata(),
     }
 
 
