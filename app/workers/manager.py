@@ -257,9 +257,12 @@ class WorkerManager:
             },
             "gpu_health": self._gpu_health_state,
             "scheduling": {
+                "download_workers": self.context.settings.download_workers,
                 "download_batch_size": self.context.settings.download_batch_size,
+                "gpu_workers": 1,
                 "gpu_batch_size": 1,
                 "gpu_stages": [JobStage.PROCESS.value, JobStage.ANALYZE.value],
+                "process_cpu_workers": self.context.settings.process_workers,
                 "process_cpu_batch_size": self.context.settings.process_batch_size,
                 "claim_order": ["priority_desc", "created_at_asc"],
                 "stages": [stage.value for stage in JobStage],
