@@ -59,7 +59,31 @@ def test_memory_bounded_demix_adds_segment_limit(tmp_path, monkeypatch):
     assert captured["check"] is True
     assert captured["cmd"][captured["cmd"].index("--name") + 1] == "htdemucs_ft"
     assert captured["cmd"][captured["cmd"].index("-n") + 1] == "htdemucs_ft"
+    assert "--repo" not in captured["cmd"]
     assert "--segment" in captured["cmd"]
     assert captured["cmd"][captured["cmd"].index("--segment") + 1] == "5"
     assert "--jobs" in captured["cmd"]
     assert captured["cmd"][captured["cmd"].index("--jobs") + 1] == "0"
+
+
+def test_memory_bounded_demix_uses_static_repo_when_model_yaml_exists(tmp_path, monkeypatch):
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"audio")
+    demix_dir = tmp_path / "demix"
+    static_models = tmp_path / "static_models"
+    static_models.mkdir()
+    (static_models / "htdemucs.yaml").write_text("model: htdemucs", encoding="utf-8")
+    captured = {}
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs")
+
+    def fake_run(cmd, check):
+        captured["cmd"] = cmd
+        captured["check"] = check
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(allinone_module.subprocess, "run", fake_run)
+
+    AllInOneRuntime._memory_bounded_demix([audio_path], demix_dir, "cuda:0")
+
+    assert "--repo" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--repo") + 1] == str(static_models.resolve())

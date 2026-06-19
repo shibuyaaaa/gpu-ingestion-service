@@ -125,6 +125,8 @@ class AllInOneRuntime:
         if not todos:
             return demix_paths
 
+        demucs_model = _demucs_model_name()
+        static_models_dir = (demix_dir.parent / "static_models").resolve()
         cmd = [
             sys.executable,
             "-m",
@@ -132,14 +134,14 @@ class AllInOneRuntime:
             "--out",
             demix_dir.as_posix(),
             "--name",
-            _demucs_model_name(),
+            demucs_model,
             "--device",
             str(device),
-            "--repo",
-            (demix_dir.parent / "static_models").resolve().as_posix(),
             "-n",
-            _demucs_model_name(),
+            demucs_model,
         ]
+        if (static_models_dir / f"{demucs_model}.yaml").is_file():
+            cmd.extend(["--repo", static_models_dir.as_posix()])
         segment_seconds = os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5").strip()
         if segment_seconds:
             cmd.extend(["--segment", segment_seconds])
