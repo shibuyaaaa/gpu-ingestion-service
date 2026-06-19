@@ -38,7 +38,7 @@ class Settings:
     work_dir: Path = Path(os.getenv("WORK_DIR", "tmp"))
     max_total_queue_depth: int = _int_env("MAX_TOTAL_QUEUE_DEPTH", 1000)
     download_workers: int = _int_env("DOWNLOAD_WORKERS", _int_env("PREP_WORKERS", 4))
-    process_workers: int = _int_env("PROCESS_WORKERS", _int_env("POSTPROCESS_WORKERS", 2))
+    process_workers: int = _int_env("PROCESS_WORKERS", _int_env("POSTPROCESS_WORKERS", 3))
     download_batch_size: int = _int_env("DOWNLOAD_BATCH_SIZE", _int_env("PREP_BATCH_SIZE", 2))
     process_batch_size: int = _int_env("PROCESS_BATCH_SIZE", _int_env("POSTPROCESS_BATCH_SIZE", 1))
     analyze_batch_size: int = _int_env("ANALYZE_BATCH_SIZE", _int_env("GPU_BATCH_SIZE", 1))
