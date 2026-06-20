@@ -15,6 +15,16 @@ from app.jobs.adapters import (
 from app.queue import JobStage, JobStatus, JobStore, JobType, QueueFull
 
 
+def test_queue_initializes_wal_once():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+
+        with sqlite3.connect(store.db_path) as conn:
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+        assert journal_mode.lower() == "wal"
+
+
 def test_enqueue_is_idempotent_by_job_id():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
