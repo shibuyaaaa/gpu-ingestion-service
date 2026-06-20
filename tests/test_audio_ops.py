@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.legacy.audio import AudioOps
@@ -56,3 +58,36 @@ async def test_extract_segment_uses_thread_cap(monkeypatch, tmp_path):
     assert cmd[cmd.index("-threads") + 1] == "1"
     assert cmd[cmd.index("-ss") + 1] == "1.25"
     assert cmd[cmd.index("-t") + 1] == "8.5"
+
+
+@pytest.mark.asyncio
+async def test_ffmpeg_concurrency_limits_active_subprocesses(monkeypatch, tmp_path):
+    active = 0
+    max_active = 0
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            nonlocal active
+            await asyncio.sleep(0.01)
+            active -= 1
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*cmd, stdout, stderr):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        return FakeProc()
+
+    monkeypatch.setenv("FFMPEG_CONCURRENCY", "2")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    await asyncio.gather(
+        *(
+            AudioOps.convert_to_mp3(tmp_path / f"input-{index}.wav", tmp_path / f"output-{index}.mp3")
+            for index in range(5)
+        )
+    )
+
+    assert max_active == 2

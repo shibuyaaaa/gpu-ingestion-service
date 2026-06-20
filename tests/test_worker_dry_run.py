@@ -70,6 +70,7 @@ def test_worker_uses_short_retry_delay_for_download_failures():
         assert manager._retry_delay_seconds(job) == 4
         assert manager._retry_delay_seconds(replace(job, stage=JobStage.ANALYZE)) == 31
         assert manager.state()["scheduling"]["retry_delay_seconds"] == {"download": 4, "default": 31}
+        assert manager.state()["scheduling"]["ffmpeg_concurrency"] == settings.ffmpeg_concurrency
         assert manager.state()["scheduling"]["worker_poll_seconds"] == settings.worker_poll_seconds
 
 

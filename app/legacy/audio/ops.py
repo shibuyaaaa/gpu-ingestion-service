@@ -3,6 +3,8 @@ import os
 import shutil
 from pathlib import Path
 
+_FFMPEG_SEMAPHORES: dict[tuple[int, int], asyncio.Semaphore] = {}
+
 
 class AudioOps:
     """Small ffmpeg helpers used by local job adapters."""
@@ -90,6 +92,15 @@ class AudioOps:
 
     @staticmethod
     async def _run_ffmpeg(cmd: list[str]) -> None:
+        semaphore = AudioOps._ffmpeg_semaphore()
+        if semaphore is None:
+            await AudioOps._run_ffmpeg_unbounded(cmd)
+            return
+        async with semaphore:
+            await AudioOps._run_ffmpeg_unbounded(cmd)
+
+    @staticmethod
+    async def _run_ffmpeg_unbounded(cmd: list[str]) -> None:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
@@ -106,3 +117,16 @@ class AudioOps:
         if threads and threads != "0":
             cmd.extend(["-threads", str(max(1, int(threads)))])
         return cmd
+
+    @staticmethod
+    def _ffmpeg_semaphore() -> asyncio.Semaphore | None:
+        raw_limit = os.getenv("FFMPEG_CONCURRENCY", "3").strip()
+        if raw_limit in {"", "0"}:
+            return None
+        limit = max(1, int(raw_limit))
+        key = (id(asyncio.get_running_loop()), limit)
+        semaphore = _FFMPEG_SEMAPHORES.get(key)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(limit)
+            _FFMPEG_SEMAPHORES[key] = semaphore
+        return semaphore
