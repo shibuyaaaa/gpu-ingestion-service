@@ -536,6 +536,7 @@ class DissectAdapter(JobAdapter):
                 stem_source = "segment_htdemucs"
 
         selected_stems = dict(_filter_stems(stems, stem_group))
+        upload_cache_key = _segment_stem_cache_key(job.artifacts, segment)
 
         if context.settings.dry_run_mode:
             uploaded = {stem: path for stem, path in selected_stems.items()}
@@ -556,6 +557,7 @@ class DissectAdapter(JobAdapter):
                     job_id=job.id,
                     segment_id=segment_id,
                     context=context,
+                    upload_cache_key=upload_cache_key,
                 )
                 if not chord_published:
                     chord_result = {
@@ -581,6 +583,7 @@ class DissectAdapter(JobAdapter):
                         job_id=job.id,
                         segment_id=segment_id,
                         context=context,
+                        upload_cache_key=upload_cache_key,
                     )
                     for stem, path in other_items
                 )
@@ -619,13 +622,27 @@ class DissectAdapter(JobAdapter):
         job_id: str,
         segment_id: str,
         context: JobContext,
+        upload_cache_key: str | None = None,
     ) -> str:
         local_path = Path(path)
         if local_path.suffix.lower() != ".mp3":
             mp3_path = local_path.with_suffix(".mp3")
             await AudioOps.convert_to_mp3(local_path, mp3_path)
             local_path = mp3_path
-        gcs_path = f"gpu-ingestion/{job_id}/segments/{segment_id}/{stem}.mp3"
+        gcs_path = _segment_upload_gcs_path(
+            stem=stem,
+            job_id=job_id,
+            segment_id=segment_id,
+            upload_cache_key=upload_cache_key if context.settings.gcs_segment_upload_cache_enabled else None,
+        )
+        exists_fn = getattr(context.gcs, "exists", None)
+        if (
+            upload_cache_key
+            and context.settings.gcs_segment_upload_cache_enabled
+            and exists_fn is not None
+            and await exists_fn(gcs_path)
+        ):
+            return f"{context.settings.cdn_base_url}/{gcs_path}"
         return await context.gcs.upload(local_path, gcs_path, content_type="audio/mpeg")
 
     async def _process_fanout_job(self, job: JobRecord, context: JobContext) -> StageResult:
@@ -1180,6 +1197,18 @@ def _segment_stem_cache_key(artifacts: dict[str, Any], segment: dict[str, Any]) 
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:20]
     return f"{_safe_job_part(source_key)}-{digest}"
+
+
+def _segment_upload_gcs_path(
+    *,
+    stem: str,
+    job_id: str,
+    segment_id: str,
+    upload_cache_key: str | None,
+) -> str:
+    if upload_cache_key:
+        return f"gpu-ingestion/cache/segment-stems/{_safe_job_part(upload_cache_key)}/{_safe_job_part(stem)}.mp3"
+    return f"gpu-ingestion/{job_id}/segments/{segment_id}/{stem}.mp3"
 
 
 def _analysis_cache_lock(cache_key: str) -> asyncio.Lock:

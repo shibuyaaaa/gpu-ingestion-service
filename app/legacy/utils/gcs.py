@@ -24,6 +24,17 @@ class GCSClient:
     def health(self) -> bool:
         return self.client.bucket(self.bucket_name).exists()
 
+    async def exists(self, gcs_path: str, *, bucket_name: str | None = None) -> bool:
+        return await asyncio.to_thread(self._exists_sync, gcs_path, bucket_name)
+
+    def _exists_sync(self, gcs_path: str, bucket_name: str | None) -> bool:
+        resolved_bucket = bucket_name or self.bucket_name
+        try:
+            bucket = self.client.bucket(resolved_bucket)
+            return bool(bucket.blob(gcs_path).exists())
+        except Exception:
+            return self._gcloud_storage_exists(f"gs://{resolved_bucket}/{gcs_path}")
+
     async def download(self, gcs_path: str, local_path: str | Path, *, bucket_name: str | None = None) -> str:
         return await asyncio.to_thread(self._download_sync, gcs_path, Path(local_path), bucket_name)
 
@@ -79,3 +90,16 @@ class GCSClient:
             cmd.extend(["--content-type", content_type])
         cmd.extend([source, target])
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+    @staticmethod
+    def _gcloud_storage_exists(target: str) -> bool:
+        if not shutil.which("gcloud"):
+            return False
+        proc = subprocess.run(
+            ["gcloud", "storage", "ls", target],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return proc.returncode == 0

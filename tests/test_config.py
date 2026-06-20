@@ -30,6 +30,7 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
     assert settings.source_audio_cache_max_bytes == 8 * 1024**3
     assert settings.analysis_cache_max_bytes == 2 * 1024**3
     assert settings.segment_stem_cache_max_bytes == 8 * 1024**3
+    assert settings.gcs_segment_upload_cache_enabled is True
 
 
 def test_cache_byte_env_accepts_human_readable_units(monkeypatch):

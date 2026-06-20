@@ -750,6 +750,9 @@ async def test_segment_stem_cache_reuses_sliced_full_stem_segments(monkeypatch, 
         return paths
 
     class FakeGCS:
+        async def exists(self, gcs_path):
+            return False
+
         async def upload(self, local_path, gcs_path, *, content_type):
             return f"https://cdn.test/{Path(gcs_path).name}"
 
@@ -805,6 +808,54 @@ async def test_segment_stem_cache_reuses_sliced_full_stem_segments(monkeypatch, 
     assert second["stem_source"] == "segment_stem_cache"
     assert Path(second["stem_paths"]["other"]).exists()
     assert Path(second["stem_paths"]["vocals"]).exists()
+
+
+async def test_cached_segment_upload_reuses_existing_gcs_object(tmp_path):
+    class FakeGCS:
+        def __init__(self):
+            self.uploads = []
+
+        async def exists(self, gcs_path):
+            return True
+
+        async def upload(self, local_path, gcs_path, *, content_type):
+            self.uploads.append(gcs_path)
+            return f"https://cdn.test/{gcs_path}"
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+        cdn_base_url="https://cdn.test",
+        gcs_segment_upload_cache_enabled=True,
+    )
+    local_stem = tmp_path / "other.mp3"
+    local_stem.write_bytes(b"mp3")
+    context = JobContext(
+        settings=settings,
+        store=JobStore(settings.queue_db_path),
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=LibraryWriter(
+            db=DBClient(database_url=""),
+            settings=settings,
+            membership=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        ),
+    )
+
+    url = await BulkDissectAdapter._prepare_and_upload_stem(
+        stem="other",
+        path=str(local_stem),
+        job_id="job-1",
+        segment_id="seg-1",
+        context=context,
+        upload_cache_key="youtube-video-seg",
+    )
+
+    assert url == "https://cdn.test/gpu-ingestion/cache/segment-stems/youtube-video-seg/other.mp3"
+    assert context.gcs.uploads == []
 
 
 async def test_full_stem_segment_extraction_runs_stems_concurrently(monkeypatch, tmp_path):
