@@ -64,6 +64,7 @@ class Settings:
     cloud_run_upload_transcode_enabled: bool = _bool_env("CLOUD_RUN_UPLOAD_TRANSCODE_ENABLED", True)
     cloud_run_max_upload_bytes: int = _int_env("CLOUD_RUN_MAX_UPLOAD_BYTES", 24_000_000)
     cloud_run_upload_bitrate: str = os.getenv("CLOUD_RUN_UPLOAD_BITRATE", "320k")
+    segment_manifest_upload_enabled: bool = _bool_env("SEGMENT_MANIFEST_UPLOAD_ENABLED", False)
     cuda_runtime_tuning: bool = _bool_env("CUDA_RUNTIME_TUNING", True)
     cuda_allow_tf32: bool = _bool_env("CUDA_ALLOW_TF32", True)
     cuda_cudnn_benchmark: bool = _bool_env("CUDA_CUDNN_BENCHMARK", True)

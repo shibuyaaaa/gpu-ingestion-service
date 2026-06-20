@@ -387,10 +387,12 @@ async def test_full_stem_segment_extraction_runs_stems_concurrently(monkeypatch,
 async def test_other_stem_uploads_run_concurrently(monkeypatch, tmp_path):
     active = 0
     max_active = 0
+    uploaded_paths = []
 
     class FakeGCS:
         async def upload(self, local_path, gcs_path, *, content_type):
             nonlocal active, max_active
+            uploaded_paths.append(gcs_path)
             if gcs_path.endswith(".mp3"):
                 active += 1
                 max_active = max(max_active, active)
@@ -445,6 +447,62 @@ async def test_other_stem_uploads_run_concurrently(monkeypatch, tmp_path):
 
     assert set(result["outputs"]) == {"vocals", "drums", "bass"}
     assert max_active > 1
+    assert result["manifest_url"] is None
+    assert not any(path.endswith("manifest.json") for path in uploaded_paths)
+
+
+async def test_segment_manifest_upload_is_optional(monkeypatch, tmp_path):
+    uploaded_paths = []
+
+    class FakeGCS:
+        async def upload(self, local_path, gcs_path, *, content_type):
+            uploaded_paths.append(gcs_path)
+            return f"https://cdn.test/{Path(gcs_path).name}"
+
+    class FakeWriter:
+        async def publish_segment(self, *, job, segment, segment_result, status):
+            return LibraryPublishResult(enabled=True, song_id="song-1", status=status)
+
+    stem_path = tmp_path / "other.mp3"
+    stem_path.write_bytes(b"mp3")
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+        segment_manifest_upload_enabled=True,
+    )
+    store = JobStore(settings.queue_db_path)
+    job, _ = store.enqueue({"job_id": "manifest-enabled", "job_type": "bulk_dissect", "source": "song"})
+    store.complete_stage(
+        job.id,
+        next_stage=JobStage.PROCESS,
+        artifacts={
+            "work_dir": str(tmp_path / "work" / "jobs" / job.id),
+            "audio_path": str(tmp_path / "source.wav"),
+            "stem_paths": {"other": str(stem_path)},
+        },
+    )
+    job = store.get(job.id)
+    context = JobContext(
+        settings=settings,
+        store=store,
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=FakeWriter(),
+    )
+
+    result = await BulkDissectAdapter()._process_segment(
+        job,
+        context,
+        {"id": "seg-1", "start": 0.0, "end": 8.0, "label": "chorus"},
+        output_prefix="segments",
+        stem_group="chord",
+    )
+
+    assert result["manifest_url"] == "https://cdn.test/manifest.json"
+    assert any(path.endswith("manifest.json") for path in uploaded_paths)
 
 
 async def test_chord_job_slices_only_chord_and_child_uses_full_stems(monkeypatch, tmp_path):

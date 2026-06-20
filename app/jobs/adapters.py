@@ -355,16 +355,18 @@ class DissectAdapter(JobAdapter):
             )
             uploaded.update((stem, url) for (stem, _), url in zip(other_items, other_uploads, strict=True))
             timings["upload_and_publish_seconds"] = round(time.perf_counter() - upload_started, 6)
-            manifest_url = await _upload_segment_manifest(
-                job=job,
-                context=context,
-                segment_dir=segment_dir,
-                segment=segment,
-                segment_id=segment_id,
-                stem_group=stem_group,
-                outputs=uploaded,
-                library_publish=early_library_publish,
-            )
+            manifest_url = None
+            if context.settings.segment_manifest_upload_enabled:
+                manifest_url = await _upload_segment_manifest(
+                    job=job,
+                    context=context,
+                    segment_dir=segment_dir,
+                    segment=segment,
+                    segment_id=segment_id,
+                    stem_group=stem_group,
+                    outputs=uploaded,
+                    library_publish=early_library_publish,
+                )
 
         return {
             "segment": segment,
