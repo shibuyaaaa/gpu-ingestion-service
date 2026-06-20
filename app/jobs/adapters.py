@@ -371,6 +371,7 @@ class DissectAdapter(JobAdapter):
         skipped = {str(segment_id) for segment_id in artifacts.get("skip_segment_ids", [])}
         root_job_id = str(job.payload.get("root_job_id") or job.id)
         child_specs = []
+        pre_enqueue_other_stems = bool(artifacts.get("full_stem_paths")) and not context.settings.dry_run_mode
 
         for segment in segments:
             segment_id = str(segment["id"])
@@ -381,6 +382,7 @@ class DissectAdapter(JobAdapter):
             process_group = "quick" if is_quick_chorus else "bulk"
             priority = PROCESS_PRIORITY_QUICK_CHORD if is_quick_chorus else PROCESS_PRIORITY_BULK_CHORD
             child_id = f"{root_job_id}:{process_group}:{_safe_job_part(segment_id)}:chord"
+            other_child_id = f"{root_job_id}:{process_group}:{_safe_job_part(segment_id)}:other"
             child_specs.append(
                 {
                     "child_id": child_id,
@@ -408,9 +410,41 @@ class DissectAdapter(JobAdapter):
                         "other_stems_priority": (
                             PROCESS_PRIORITY_QUICK_OTHER if is_quick_chorus else PROCESS_PRIORITY_BULK_OTHER
                         ),
+                        "other_stems_job_id": other_child_id if pre_enqueue_other_stems else None,
+                        "other_stems_pre_enqueued": pre_enqueue_other_stems,
                     },
                 }
             )
+            if pre_enqueue_other_stems:
+                other_priority = PROCESS_PRIORITY_QUICK_OTHER if is_quick_chorus else PROCESS_PRIORITY_BULK_OTHER
+                child_specs.append(
+                    {
+                        "child_id": other_child_id,
+                        "job_type": child_job_type,
+                        "priority": other_priority,
+                        "segment_id": segment_id,
+                        "process_group": process_group,
+                        "payload": {
+                            "source": job.artifacts.get("source") or job.payload.get("source"),
+                            "root_job_id": root_job_id,
+                            "process_mode": PROCESS_MODE_SEGMENT_OTHER,
+                            "process_group": process_group,
+                            "segment_id": segment_id,
+                            "skip_library_write": _truthy_payload_flag(job, "skip_library_write"),
+                        },
+                        "artifacts": {
+                            **self._base_process_artifacts(job, artifacts),
+                            "process_mode": PROCESS_MODE_SEGMENT_OTHER,
+                            "process_group": process_group,
+                            "root_job_id": root_job_id,
+                            "parent_job_id": job.id,
+                            "segment_id": segment_id,
+                            "segment": segment,
+                            "requires_gpu": False,
+                            "other_stems_pre_enqueued": True,
+                        },
+                    }
+                )
 
         enqueued_children = context.store.enqueue_process_children(parent_job=job, children=child_specs)
         children = [
@@ -418,7 +452,7 @@ class DissectAdapter(JobAdapter):
                 "job_id": child.id,
                 "segment_id": str(spec["segment_id"]),
                 "process_group": str(spec["process_group"]),
-                "process_mode": PROCESS_MODE_SEGMENT_CHORD,
+                "process_mode": str(spec["artifacts"].get("process_mode")),
                 "priority": child.priority,
             }
             for spec, child in zip(child_specs, enqueued_children, strict=True)
@@ -426,7 +460,11 @@ class DissectAdapter(JobAdapter):
 
         return {
             "root_job_id": root_job_id,
-            "strategy": "segment_chord_jobs_enqueue_other_stem_jobs",
+            "strategy": (
+                "segment_chord_and_other_jobs_priority_fanout"
+                if pre_enqueue_other_stems
+                else "segment_chord_jobs_enqueue_other_stem_jobs"
+            ),
             "children": children,
             "child_count": len(children),
             "priority_order": [
@@ -815,10 +853,15 @@ class DissectAdapter(JobAdapter):
                 output_prefix=output_prefix,
                 stem_group="chord",
             )
-            other_job = self._enqueue_other_stems_job(job, context, segment, result)
+            pre_enqueued_other_id = (
+                str(job.artifacts.get("other_stems_job_id") or "")
+                if job.artifacts.get("other_stems_pre_enqueued")
+                else ""
+            )
+            other_job = None if pre_enqueued_other_id else self._enqueue_other_stems_job(job, context, segment, result)
             library_complete = None
             fanout_maybe_complete = False
-            if other_job is None and not context.settings.dry_run_mode:
+            if not pre_enqueued_other_id and other_job is None and not context.settings.dry_run_mode:
                 root_job_id = str(job.artifacts.get("root_job_id") or job.payload.get("root_job_id") or job.id)
                 sibling_summary = context.store.child_summary(root_job_id, exclude_job_id=job.id)
                 fanout_maybe_complete = sibling_summary["active"] == 0 and sibling_summary["failed"] == 0
@@ -832,7 +875,7 @@ class DissectAdapter(JobAdapter):
                 "process_group": process_group,
                 "segment_id": str(segment["id"]),
                 "chord_outputs": result.get("outputs", {}),
-                "other_stems_job_id": other_job.id if other_job else None,
+                "other_stems_job_id": pre_enqueued_other_id or (other_job.id if other_job else None),
                 "quick_dissect_confirmation": process_group == "quick",
                 "library_complete": library_complete,
                 "dry_run": context.settings.dry_run_mode,
@@ -841,7 +884,7 @@ class DissectAdapter(JobAdapter):
                 next_stage=None,
                 artifacts={
                     "segment_result": result,
-                    "other_stems_job_id": other_job.id if other_job else None,
+                    "other_stems_job_id": pre_enqueued_other_id or (other_job.id if other_job else None),
                     "library_complete": library_complete,
                     "fanout_maybe_complete": fanout_maybe_complete,
                     "final_outputs": final_outputs,

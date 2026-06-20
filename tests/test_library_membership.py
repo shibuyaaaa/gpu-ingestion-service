@@ -591,7 +591,12 @@ async def test_analyze_reuses_cached_all_in_one_outputs_for_same_youtube_source(
         assert second.artifacts["analysis_timings"]["allin1_analyze_seconds"] == 0.0
         assert second.artifacts["analysis_timings"]["demix_total_seconds"] == 0.0
         assert Path(second.artifacts["full_stem_paths"]["other"]).exists()
-        assert second.artifacts["fanout"]["child_count"] == 1
+        assert second.artifacts["fanout"]["strategy"] == "segment_chord_and_other_jobs_priority_fanout"
+        assert second.artifacts["fanout"]["child_count"] == 2
+        assert [child["process_mode"] for child in second.artifacts["fanout"]["children"]] == [
+            "segment_chord",
+            "segment_other",
+        ]
 
 
 async def test_missing_library_song_continues_download_stage(monkeypatch):
@@ -1303,6 +1308,82 @@ async def test_hot_chord_url_shortcut_still_publishes_partial(tmp_path):
     assert events == [("partial", result["outputs"])]
     assert result["outputs"]["other"].endswith(f"{cache_key}/other.mp3")
     adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
+
+
+async def test_pre_enqueued_chord_child_does_not_enqueue_duplicate_other(tmp_path):
+    class FakeGCS:
+        async def upload(self, local_path, gcs_path, *, content_type):
+            return f"https://cdn.test/{Path(gcs_path).name}"
+
+    class FakeWriter:
+        async def publish_segment(self, *, job, segment, segment_result, status):
+            return LibraryPublishResult(enabled=True, song_id="song-1", status=status)
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+    )
+    store = JobStore(settings.queue_db_path)
+    root, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+    segment = {"id": "seg-1", "start": 0.0, "end": 8.0, "label": "chorus"}
+    stem_path = tmp_path / "other.mp3"
+    stem_path.write_bytes(b"mp3")
+    chord = store.enqueue_process_child(
+        parent_job=root,
+        child_id="root:bulk:seg-1:chord",
+        job_type=JobType.BULK_DISSECT,
+        payload={"source": "song", "root_job_id": root.id, "process_mode": "segment_chord", "segment_id": "seg-1"},
+        artifacts={
+            "work_dir": str(tmp_path / "work" / "jobs" / root.id),
+            "audio_path": str(tmp_path / "source.wav"),
+            "process_mode": "segment_chord",
+            "process_group": "bulk",
+            "root_job_id": root.id,
+            "segment_id": "seg-1",
+            "segment": segment,
+            "stem_paths": {"other": str(stem_path)},
+            "other_stems_pre_enqueued": True,
+            "other_stems_job_id": "root:bulk:seg-1:other",
+            "requires_gpu": False,
+        },
+        priority=300,
+    )
+    store.enqueue_process_child(
+        parent_job=root,
+        child_id="root:bulk:seg-1:other",
+        job_type=JobType.BULK_DISSECT,
+        payload={"source": "song", "root_job_id": root.id, "process_mode": "segment_other", "segment_id": "seg-1"},
+        artifacts={
+            "work_dir": str(tmp_path / "work" / "jobs" / root.id),
+            "audio_path": str(tmp_path / "source.wav"),
+            "process_mode": "segment_other",
+            "process_group": "bulk",
+            "root_job_id": root.id,
+            "segment_id": "seg-1",
+            "segment": segment,
+            "stem_paths": {},
+            "requires_gpu": False,
+        },
+        priority=100,
+    )
+    store.claim_next([JobStage.PROCESS], "process-worker")
+    chord = store.get(chord.id)
+    context = JobContext(
+        settings=settings,
+        store=store,
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=FakeWriter(),
+    )
+
+    result = await BulkDissectAdapter()._process_fanout_job(chord, context)
+
+    assert result.artifacts["other_stems_job_id"] == "root:bulk:seg-1:other"
+    assert result.artifacts["final_outputs"]["other_stems_job_id"] == "root:bulk:seg-1:other"
+    assert store.child_summary(root.id)["total"] == 2
 
 
 async def test_segment_manifest_upload_is_optional(monkeypatch, tmp_path):
