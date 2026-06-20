@@ -177,8 +177,10 @@ class DissectAdapter(JobAdapter):
             cache_dir.mkdir(parents=True, exist_ok=True)
             if cache_path.is_file():
                 started = time.perf_counter()
-                shutil.copyfile(cache_path, wav_path)
-                timings["source_audio_cache_copy_seconds"] = round(time.perf_counter() - started, 6)
+                _link_or_copy(cache_path, wav_path)
+                restore_seconds = round(time.perf_counter() - started, 6)
+                timings["source_audio_cache_restore_seconds"] = restore_seconds
+                timings["source_audio_cache_copy_seconds"] = restore_seconds
                 timings["youtube_download_seconds"] = 0.0
                 timings["wav_copy_seconds"] = 0.0
                 return True
@@ -204,7 +206,7 @@ class DissectAdapter(JobAdapter):
 
                 started = time.perf_counter()
                 os.replace(tmp_wav, cache_path)
-                shutil.copyfile(cache_path, wav_path)
+                _link_or_copy(cache_path, wav_path)
                 timings["source_audio_cache_store_seconds"] = round(time.perf_counter() - started, 6)
                 timings["wav_copy_seconds"] = 0.0
                 await _prune_source_audio_cache(

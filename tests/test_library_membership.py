@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from contextlib import contextmanager
 import tempfile
 import uuid
@@ -483,7 +484,11 @@ async def test_direct_youtube_download_reuses_source_audio_cache(monkeypatch):
         assert Path(second_result.artifacts["audio_path"]).read_bytes() == b"cached-audio"
         assert first_result.artifacts["download_timings"]["youtube_download_seconds"] >= 0
         assert second_result.artifacts["download_timings"]["youtube_download_seconds"] == 0.0
+        assert second_result.artifacts["download_timings"]["source_audio_cache_restore_seconds"] >= 0
         assert second_result.artifacts["download_timings"]["source_audio_cache_copy_seconds"] >= 0
+        cache_path = settings.work_dir / "source-cache" / "dQw4w9WgXcQ.wav"
+        if hasattr(os, "link"):
+            assert os.stat(second_result.artifacts["audio_path"]).st_ino == os.stat(cache_path).st_ino
 
 
 async def test_analyze_reuses_cached_all_in_one_outputs_for_same_youtube_source():
