@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -230,6 +231,7 @@ class AllInOneRuntime:
                 "backend": _demucs_backend(),
                 "segment_seconds": os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5"),
                 "jobs": os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0"),
+                "save_workers": _demucs_save_workers(),
                 "resident_cache_keys": list(_DEMUCS_MODEL_CACHE.keys()),
             },
             "last_timings": self._last_timings,
@@ -327,10 +329,42 @@ def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs
             timings["demix_apply_seconds"] += _elapsed(started)
             sources = sources * ref.std() + ref.mean()
         started = time.perf_counter()
-        for source, name in zip(sources, model.sources):
-            save_audio(source.cpu(), str(out_dir / f"{name}.wav"), samplerate=model.samplerate)
+        _save_demucs_sources(
+            sources=sources,
+            names=model.sources,
+            out_dir=out_dir,
+            samplerate=model.samplerate,
+            save_audio_fn=save_audio,
+            workers=_demucs_save_workers(),
+        )
         timings["demix_save_seconds"] += _elapsed(started)
     return {key: _round_timing(value) if isinstance(value, float) else value for key, value in timings.items()}
+
+
+def _save_demucs_sources(
+    *,
+    sources: Any,
+    names: Any,
+    out_dir: Path,
+    samplerate: int,
+    save_audio_fn: Any,
+    workers: int,
+) -> None:
+    items = [(source.cpu(), str(out_dir / f"{name}.wav")) for source, name in zip(sources, names)]
+    if not items:
+        return
+    worker_count = min(max(1, workers), len(items))
+    if worker_count == 1:
+        for source, target in items:
+            save_audio_fn(source, target, samplerate=samplerate)
+        return
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="demucs-save") as executor:
+        futures = [
+            executor.submit(save_audio_fn, source, target, samplerate=samplerate)
+            for source, target in items
+        ]
+        for future in futures:
+            future.result()
 
 
 def _resident_demucs_model(model_name: str, device: Any, static_models_dir: Path) -> Any:
@@ -381,6 +415,10 @@ def _demucs_model_name() -> str:
 def _demucs_backend() -> str:
     value = os.getenv("ALL_IN_ONE_DEMUCS_BACKEND", "resident").strip().lower()
     return value if value in {"resident", "cli"} else "resident"
+
+
+def _demucs_save_workers() -> int:
+    return max(1, _int_env("ALL_IN_ONE_DEMUCS_SAVE_WORKERS", 2))
 
 
 def _transfer_to_device(batch: Any, device: Any) -> Any:

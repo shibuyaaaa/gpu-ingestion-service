@@ -1,5 +1,7 @@
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import app.models.allinone as allinone_module
@@ -155,3 +157,67 @@ def test_memory_bounded_demix_uses_resident_backend_by_default(tmp_path, monkeyp
     assert calls["output_dir"] == demix_dir
     assert calls["device"] == "cuda:0"
     assert calls["demucs_model"] == "htdemucs_ft"
+
+
+def test_save_demucs_sources_saves_all_sources(tmp_path):
+    calls = []
+
+    def fake_save_audio(source, target, *, samplerate):
+        calls.append((source, target, samplerate))
+
+    allinone_module._save_demucs_sources(
+        sources=[FakeSource("bass"), FakeSource("drums")],
+        names=["bass", "drums"],
+        out_dir=tmp_path,
+        samplerate=44100,
+        save_audio_fn=fake_save_audio,
+        workers=1,
+    )
+
+    assert calls == [
+        ("cpu:bass", str(tmp_path / "bass.wav"), 44100),
+        ("cpu:drums", str(tmp_path / "drums.wav"), 44100),
+    ]
+
+
+def test_save_demucs_sources_can_use_multiple_workers(tmp_path):
+    thread_names = set()
+    calls = []
+    lock = threading.Lock()
+
+    def fake_save_audio(source, target, *, samplerate):
+        time.sleep(0.01)
+        with lock:
+            thread_names.add(threading.current_thread().name)
+            calls.append((source, Path(target).name, samplerate))
+
+    allinone_module._save_demucs_sources(
+        sources=[FakeSource("bass"), FakeSource("drums"), FakeSource("other"), FakeSource("vocals")],
+        names=["bass", "drums", "other", "vocals"],
+        out_dir=tmp_path,
+        samplerate=44100,
+        save_audio_fn=fake_save_audio,
+        workers=2,
+    )
+
+    assert sorted(calls) == [
+        ("cpu:bass", "bass.wav", 44100),
+        ("cpu:drums", "drums.wav", 44100),
+        ("cpu:other", "other.wav", 44100),
+        ("cpu:vocals", "vocals.wav", 44100),
+    ]
+    assert any(name.startswith("demucs-save") for name in thread_names)
+
+
+def test_demucs_save_workers_defaults_to_two(monkeypatch):
+    monkeypatch.delenv("ALL_IN_ONE_DEMUCS_SAVE_WORKERS", raising=False)
+
+    assert allinone_module._demucs_save_workers() == 2
+
+
+class FakeSource:
+    def __init__(self, name: str):
+        self.name = name
+
+    def cpu(self):
+        return f"cpu:{self.name}"

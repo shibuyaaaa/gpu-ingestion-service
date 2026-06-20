@@ -75,6 +75,7 @@ run with `DRY_RUN_MODE=false`.
 - `ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS`: memory-bounded Demucs segment size used inside all-in-one analysis. Default: `5`.
 - `ALL_IN_ONE_DEMUCS_OVERLAP`: Demucs split overlap inside all-in-one analysis. Default: `0.10` for faster L4 throughput.
 - `ALL_IN_ONE_DEMUCS_JOBS`: Demucs worker count used inside all-in-one analysis. Default: `0`.
+- `ALL_IN_ONE_DEMUCS_SAVE_WORKERS`: CPU workers for saving Demucs stems after inference. Default: `2`.
 - `GPU_HEALTH_RESTART_*`: restart the service after repeated container GPU/NVML failures.
 - `GPU_PROBE_CACHE_SECONDS`: short cache for `nvidia-smi` ops probes. Default: `1.0`.
 - `DRY_RUN_MODE`: test/dev mode. Default: `false`.
