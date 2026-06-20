@@ -210,32 +210,21 @@ class JobStore:
         artifacts: dict[str, Any],
         priority: int,
     ) -> JobRecord:
-        child_payload = {
-            **payload,
-            "job_id": child_id,
-            "job_type": job_type.value,
-            "parent_job_id": parent_job.id,
-            "root_job_id": payload.get("root_job_id") or parent_job.payload.get("root_job_id") or parent_job.id,
-        }
-        job, created = self.enqueue(
-            child_payload,
-            priority=priority,
-            initial_stage=JobStage.PROCESS,
-            initial_artifacts=artifacts,
+        children = self.enqueue_process_children(
+            parent_job=parent_job,
+            children=[
+                {
+                    "child_id": child_id,
+                    "job_type": job_type,
+                    "payload": payload,
+                    "artifacts": artifacts,
+                    "priority": priority,
+                }
+            ],
         )
-        self.add_event(
-            parent_job.id,
-            JobEventType.PROCESS_CHILD_ENQUEUED,
-            data={
-                "child_job_id": job.id,
-                "created": created,
-                "job_type": job.job_type.value,
-                "priority": job.priority,
-                "process_mode": artifacts.get("process_mode"),
-                "segment_id": artifacts.get("segment_id"),
-            },
-        )
-        return job
+        if not children:
+            raise RuntimeError("process child enqueue failed")
+        return children[0]
 
     def enqueue_process_children(
         self,

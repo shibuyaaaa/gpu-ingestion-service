@@ -276,6 +276,43 @@ def test_enqueue_process_children_is_idempotent_for_existing_child_ids():
         ]
 
 
+def test_enqueue_process_child_uses_batch_semantics_for_existing_child_id():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+
+        first = store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-0:other",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_other", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_OTHER,
+        )
+        second = store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-0:other",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_other", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_OTHER,
+        )
+
+        assert first.id == second.id == "root:bulk:seg-0:other"
+        assert first.stage == second.stage == JobStage.PROCESS
+        assert store.stats()["active_depth"] == 2
+        parent_events = store.recent_events("root", limit=10)
+        child_events = store.recent_events("root:bulk:seg-0:other", limit=10)
+        assert [event["data"]["created"] for event in child_events if event["event_type"] == "enqueued"] == [
+            False,
+            True,
+        ]
+        process_events = [event for event in parent_events if event["event_type"] == "process_child_enqueued"]
+        assert [event["data"]["created"] for event in process_events] == [False, True]
+        assert process_events[0]["data"]["process_mode"] == "segment_other"
+        assert process_events[0]["data"]["segment_id"] == "seg-0"
+
+
 def test_enqueue_process_children_checks_queue_depth_once_for_new_batch():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=2)
