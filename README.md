@@ -90,13 +90,17 @@ run with `DRY_RUN_MODE=false`.
   uploading identical bytes again. Default: enabled.
 - `GCS_SEGMENT_UPLOAD_URL_CACHE_MAX_ENTRIES`: process-local positive cache for
   deterministic segment stem URLs already confirmed in GCS. Default: `10000`.
+- `GCS_SEGMENT_UPLOAD_DISK_CACHE_ENABLED`, `GCS_SEGMENT_UPLOAD_DISK_CACHE_PATH`:
+  local SQLite positive cache for deterministic segment stem URLs. This survives
+  service restarts and only stores URLs after the service uploaded or verified
+  the GCS object.
 - `MODEL_BACKEND`: `local`, `remote_gpu`, or `cloud_run_fallback`. Default: `local`.
 - `ALL_IN_ONE_GCP_URL`: Cloud Run all-in-one `/predict` service URL for remote GPU mode.
 - `ALL_IN_ONE_AUTH`: `none`, `api_key`, `google_id_token`, or `gcloud_identity_token`.
 - `ALL_IN_ONE_TIMEOUT_SECONDS`: remote GPU request timeout. Default: `1800`.
 - `ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS`: memory-bounded Demucs segment size used inside all-in-one analysis. Default: `7.5`, measured faster than `5` on the L4 while staying below the unsafe `15` second HTDemucs shape boundary.
 - `ALL_IN_ONE_DEMUCS_MAX_SEGMENT_SECONDS`: safety clamp for the effective Demucs segment size. Default: `7.5`; raise only for measured experiments.
-- `ALL_IN_ONE_DEMUCS_OVERLAP`: Demucs split overlap inside all-in-one analysis. Default: `0.10` for faster L4 throughput.
+- `ALL_IN_ONE_DEMUCS_OVERLAP`: Demucs split overlap inside all-in-one analysis. Default: `0.05` in the L4 deployment after benchmarking faster apply time than `0.10`.
 - `ALL_IN_ONE_DEMUCS_JOBS`: Demucs worker count used inside all-in-one analysis. Default: `0`.
 - `ALL_IN_ONE_DEMUCS_SAVE_WORKERS`: CPU workers for saving Demucs stems after inference. Default: `2`.
 - `GPU_HEALTH_RESTART_*`: restart the service after repeated container GPU/NVML failures.

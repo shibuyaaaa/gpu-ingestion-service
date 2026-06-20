@@ -83,6 +83,8 @@ class Settings:
     segment_stem_cache_max_bytes: int = _bytes_env("SEGMENT_STEM_CACHE_MAX_BYTES", 8 * 1024**3)
     gcs_segment_upload_cache_enabled: bool = _bool_env("GCS_SEGMENT_UPLOAD_CACHE_ENABLED", True)
     gcs_segment_upload_url_cache_max_entries: int = _int_env("GCS_SEGMENT_UPLOAD_URL_CACHE_MAX_ENTRIES", 10000)
+    gcs_segment_upload_disk_cache_enabled: bool = _bool_env("GCS_SEGMENT_UPLOAD_DISK_CACHE_ENABLED", True)
+    gcs_segment_upload_disk_cache_path: str = os.getenv("GCS_SEGMENT_UPLOAD_DISK_CACHE_PATH", "").strip()
     start_workers: bool = _bool_env("START_WORKERS", True)
     dry_run_mode: bool = _bool_env("DRY_RUN_MODE", False)
     model_backend: str = os.getenv("MODEL_BACKEND", "local").strip().lower()

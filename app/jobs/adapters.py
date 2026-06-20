@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
+import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -35,6 +37,8 @@ _SOURCE_AUDIO_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _ANALYSIS_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _SEGMENT_STEM_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _GCS_SEGMENT_UPLOAD_URL_CACHE: OrderedDict[str, str] = OrderedDict()
+_GCS_SEGMENT_UPLOAD_DISK_CACHE_INITIALIZED: set[str] = set()
+_GCS_SEGMENT_UPLOAD_DISK_CACHE_LOCK = threading.Lock()
 _MAX_CACHE_LOCKS = 2048
 
 
@@ -831,6 +835,7 @@ class DissectAdapter(JobAdapter):
                     gcs_path,
                     url,
                     max_entries=context.settings.gcs_segment_upload_url_cache_max_entries,
+                    context=context,
                 )
                 return url
             _add_timing_counter(timings, "gcs_segment_upload_cache_miss_count")
@@ -848,6 +853,7 @@ class DissectAdapter(JobAdapter):
                 gcs_path,
                 url,
                 max_entries=context.settings.gcs_segment_upload_url_cache_max_entries,
+                context=context,
             )
         return url
 
@@ -1753,6 +1759,16 @@ def _try_cached_gcs_upload_url(
     )
     if cached_url is not None:
         _add_timing_counter(timings, "gcs_segment_upload_memory_cache_hit_count")
+        return cached_url
+    cached_url = _get_disk_cached_gcs_upload_url(gcs_path, context=context)
+    if cached_url is not None:
+        _add_timing_counter(timings, "gcs_segment_upload_disk_cache_hit_count")
+        _remember_gcs_upload_url(
+            gcs_path,
+            cached_url,
+            max_entries=context.settings.gcs_segment_upload_url_cache_max_entries,
+            context=None,
+        )
     return cached_url
 
 
@@ -1766,20 +1782,160 @@ def _get_cached_gcs_upload_url(gcs_path: str, *, max_entries: int) -> str | None
     return url
 
 
-def _remember_gcs_upload_url(gcs_path: str, url: str, *, max_entries: int) -> None:
+def _remember_gcs_upload_url(
+    gcs_path: str,
+    url: str,
+    *,
+    max_entries: int,
+    context: JobContext | None = None,
+) -> None:
     if max_entries <= 0:
         return
     _GCS_SEGMENT_UPLOAD_URL_CACHE[gcs_path] = url
     _GCS_SEGMENT_UPLOAD_URL_CACHE.move_to_end(gcs_path)
     while len(_GCS_SEGMENT_UPLOAD_URL_CACHE) > max_entries:
         _GCS_SEGMENT_UPLOAD_URL_CACHE.popitem(last=False)
+    if context is not None:
+        _remember_disk_cached_gcs_upload_url(
+            gcs_path,
+            url,
+            context=context,
+            max_entries=max_entries,
+        )
 
 
-def gcs_upload_url_cache_status(*, max_entries: int) -> dict[str, Any]:
+def _gcs_upload_disk_cache_path(context: JobContext) -> Path:
+    configured = context.settings.gcs_segment_upload_disk_cache_path
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else context.settings.work_dir / path
+    return context.settings.work_dir / "gcs-upload-url-cache.sqlite3"
+
+
+def _gcs_upload_disk_cache_enabled(context: JobContext) -> bool:
+    return (
+        context.settings.gcs_segment_upload_cache_enabled
+        and context.settings.gcs_segment_upload_disk_cache_enabled
+        and context.settings.gcs_segment_upload_url_cache_max_entries > 0
+    )
+
+
+def _ensure_gcs_upload_disk_cache(path: Path) -> None:
+    path_key = str(path)
+    if path_key in _GCS_SEGMENT_UPLOAD_DISK_CACHE_INITIALIZED:
+        return
+    with _GCS_SEGMENT_UPLOAD_DISK_CACHE_LOCK:
+        if path_key in _GCS_SEGMENT_UPLOAD_DISK_CACHE_INITIALIZED:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gcs_upload_urls (
+                    gcs_path TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gcs_upload_urls_updated_at ON gcs_upload_urls(updated_at)"
+            )
+        _GCS_SEGMENT_UPLOAD_DISK_CACHE_INITIALIZED.add(path_key)
+
+
+def _get_disk_cached_gcs_upload_url(gcs_path: str, *, context: JobContext) -> str | None:
+    if not _gcs_upload_disk_cache_enabled(context):
+        return None
+    path = _gcs_upload_disk_cache_path(context)
+    try:
+        _ensure_gcs_upload_disk_cache(path)
+        with _GCS_SEGMENT_UPLOAD_DISK_CACHE_LOCK, sqlite3.connect(path) as conn:
+            row = conn.execute(
+                "SELECT url FROM gcs_upload_urls WHERE gcs_path = ?",
+                (gcs_path,),
+            ).fetchone()
+        return str(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def _remember_disk_cached_gcs_upload_url(
+    gcs_path: str,
+    url: str,
+    *,
+    context: JobContext,
+    max_entries: int,
+) -> None:
+    if not _gcs_upload_disk_cache_enabled(context):
+        return
+    path = _gcs_upload_disk_cache_path(context)
+    try:
+        _ensure_gcs_upload_disk_cache(path)
+        with _GCS_SEGMENT_UPLOAD_DISK_CACHE_LOCK, sqlite3.connect(path) as conn:
+            conn.execute(
+                """
+                INSERT INTO gcs_upload_urls (gcs_path, url, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(gcs_path) DO UPDATE SET
+                    url = excluded.url,
+                    updated_at = excluded.updated_at
+                """,
+                (gcs_path, url, time.time()),
+            )
+            count = conn.execute("SELECT COUNT(*) FROM gcs_upload_urls").fetchone()[0]
+            overflow = int(count) - max_entries
+            if overflow > 0:
+                conn.execute(
+                    """
+                    DELETE FROM gcs_upload_urls
+                    WHERE gcs_path IN (
+                        SELECT gcs_path
+                        FROM gcs_upload_urls
+                        ORDER BY updated_at ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (overflow,),
+                )
+    except Exception:
+        return
+
+
+def _gcs_upload_disk_cache_status(path: Path, *, enabled: bool) -> dict[str, Any]:
+    status = {
+        "enabled": enabled,
+        "path": str(path),
+        "entries": 0,
+        "error": None,
+    }
+    if not enabled:
+        return status
+    try:
+        _ensure_gcs_upload_disk_cache(path)
+        with _GCS_SEGMENT_UPLOAD_DISK_CACHE_LOCK, sqlite3.connect(path) as conn:
+            status["entries"] = int(conn.execute("SELECT COUNT(*) FROM gcs_upload_urls").fetchone()[0])
+    except Exception as exc:
+        status["error"] = str(exc)[:500]
+    return status
+
+
+def gcs_upload_url_cache_status(
+    *,
+    max_entries: int,
+    disk_cache_enabled: bool = False,
+    disk_cache_path: Path | None = None,
+) -> dict[str, Any]:
+    disk_path = disk_cache_path or Path("gcs-upload-url-cache.sqlite3")
     return {
         "enabled": max_entries > 0,
         "entries": len(_GCS_SEGMENT_UPLOAD_URL_CACHE),
         "max_entries": max_entries,
+        "disk": _gcs_upload_disk_cache_status(
+            disk_path,
+            enabled=disk_cache_enabled and max_entries > 0,
+        ),
     }
 
 

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import shutil
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -290,8 +291,18 @@ async def _cache_status() -> dict[str, Any]:
     )
     status["gcs_upload_url"] = gcs_upload_url_cache_status(
         max_entries=settings.gcs_segment_upload_url_cache_max_entries,
+        disk_cache_enabled=settings.gcs_segment_upload_disk_cache_enabled,
+        disk_cache_path=_gcs_upload_disk_cache_path(),
     )
     return status
+
+
+def _gcs_upload_disk_cache_path() -> Path:
+    configured = settings.gcs_segment_upload_disk_cache_path
+    if not configured:
+        return settings.work_dir / "gcs-upload-url-cache.sqlite3"
+    path = Path(configured)
+    return path if path.is_absolute() else settings.work_dir / path
 
 
 def _path_writable(path) -> bool:

@@ -976,6 +976,7 @@ async def test_cached_segment_upload_reuses_existing_gcs_object(monkeypatch, tmp
     assert timings["gcs_segment_upload_cache_hit_count"] == 1
     assert "gcs_segment_upload_count" not in timings
 
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
     second_timings = {}
     second_url = await BulkDissectAdapter._prepare_and_upload_stem(
         stem="other",
@@ -989,7 +990,7 @@ async def test_cached_segment_upload_reuses_existing_gcs_object(monkeypatch, tmp
 
     assert second_url == url
     assert context.gcs.exists_calls == 1
-    assert second_timings["gcs_segment_upload_memory_cache_hit_count"] == 1
+    assert second_timings["gcs_segment_upload_disk_cache_hit_count"] == 1
     assert "gcs_segment_upload_cache_lookup_count" not in second_timings
     adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
 
@@ -1044,6 +1045,7 @@ async def test_uploaded_segment_url_is_cached_after_gcs_miss(tmp_path):
         upload_cache_key="youtube-new-seg",
         timings=first_timings,
     )
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
     second_timings = {}
     second = await BulkDissectAdapter._prepare_and_upload_stem(
         stem="other",
@@ -1060,7 +1062,22 @@ async def test_uploaded_segment_url_is_cached_after_gcs_miss(tmp_path):
     assert context.gcs.uploads == ["gpu-ingestion/cache/segment-stems/youtube-new-seg/other.mp3"]
     assert first_timings["gcs_segment_upload_cache_miss_count"] == 1
     assert first_timings["gcs_segment_upload_count"] == 1
-    assert second_timings["gcs_segment_upload_memory_cache_hit_count"] == 1
+    assert second_timings["gcs_segment_upload_disk_cache_hit_count"] == 1
+
+    third_timings = {}
+    third = await BulkDissectAdapter._prepare_and_upload_stem(
+        stem="other",
+        path=str(local_stem),
+        job_id="job-3",
+        segment_id="seg-1",
+        context=context,
+        upload_cache_key="youtube-new-seg",
+        timings=third_timings,
+    )
+
+    assert third == first
+    assert context.gcs.exists_calls == 1
+    assert third_timings["gcs_segment_upload_memory_cache_hit_count"] == 1
     adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
 
 
