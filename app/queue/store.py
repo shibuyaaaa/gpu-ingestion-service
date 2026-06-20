@@ -428,38 +428,56 @@ class JobStore:
         now = time.time()
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                f"""
-                SELECT * FROM jobs
-                WHERE status = ?
-                  AND available_at <= ?
-                  AND {extra_where}
-                ORDER BY priority DESC,
-                         created_at ASC,
-                         id ASC
-                LIMIT ?
-                """,
-                (JobStatus.QUEUED.value, now, *extra_params, limit),
-            ).fetchall()
-            if not rows:
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM jobs
+                    WHERE status = ?
+                      AND available_at <= ?
+                      AND {extra_where}
+                    ORDER BY priority DESC,
+                             created_at ASC,
+                             id ASC
+                    LIMIT ?
+                    """,
+                    (JobStatus.QUEUED.value, now, *extra_params, limit),
+                ).fetchall()
+                if not rows:
+                    conn.execute("COMMIT")
+                    return []
+                job_ids = [row["id"] for row in rows]
+                id_placeholders = ",".join("?" for _ in job_ids)
+                conn.execute(
+                    f"""
+                    UPDATE jobs
+                    SET status = ?,
+                        worker_id = ?,
+                        updated_at = ?
+                    WHERE id IN ({id_placeholders})
+                    """,
+                    (JobStatus.PROCESSING.value, worker_id, now, *job_ids),
+                )
+                for row in rows:
+                    _add_event_conn(
+                        conn,
+                        row["id"],
+                        JobEventType.CLAIMED,
+                        created_at=now,
+                        data={"stage": row["stage"], "worker_id": worker_id},
+                    )
                 conn.execute("COMMIT")
-                return []
-            job_ids = [row["id"] for row in rows]
-            id_placeholders = ",".join("?" for _ in job_ids)
-            conn.execute(
-                f"""
-                UPDATE jobs
-                SET status = ?,
-                    worker_id = ?,
-                    updated_at = ?
-                WHERE id IN ({id_placeholders})
-                """,
-                (JobStatus.PROCESSING.value, worker_id, now, *job_ids),
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        records = [
+            self._row_to_record(
+                row,
+                status=JobStatus.PROCESSING,
+                worker_id=worker_id,
+                updated_at=now,
             )
-            conn.execute("COMMIT")
-        records = [record for job_id in job_ids if (record := self.get(job_id)) is not None]
-        for record in records:
-            self.add_event(record.id, JobEventType.CLAIMED, data={"stage": record.stage.value, "worker_id": worker_id})
+            for row in rows
+        ]
         return records
 
     def complete_stage(
@@ -860,21 +878,27 @@ class JobStore:
         return DEFAULT_JOB_PRIORITIES.get(job_type, 0)
 
     @staticmethod
-    def _row_to_record(row: sqlite3.Row) -> JobRecord:
+    def _row_to_record(
+        row: sqlite3.Row,
+        *,
+        status: JobStatus | None = None,
+        worker_id: str | None = None,
+        updated_at: float | None = None,
+    ) -> JobRecord:
         return JobRecord(
             id=row["id"],
             job_type=JobType(row["job_type"]),
             stage=JobStage(row["stage"]),
-            status=JobStatus(row["status"]),
+            status=status or JobStatus(row["status"]),
             payload=json.loads(row["payload_json"]),
             artifacts=json.loads(row["artifacts_json"]),
             attempts=row["attempts"],
             max_attempts=row["max_attempts"],
             priority=row["priority"],
-            worker_id=row["worker_id"],
+            worker_id=worker_id if worker_id is not None else row["worker_id"],
             error=row["error"],
             created_at=row["created_at"],
-            updated_at=row["updated_at"],
+            updated_at=updated_at if updated_at is not None else row["updated_at"],
             available_at=row["available_at"],
         )
 

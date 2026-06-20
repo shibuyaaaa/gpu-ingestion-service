@@ -103,6 +103,24 @@ def test_claim_batch_respects_limit():
         assert store.get("job-2").status == JobStatus.QUEUED
 
 
+def test_claim_batch_returns_processing_records_and_writes_events():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        store.enqueue({"job_id": "job-0", "job_type": "bulk_dissect", "source": "song"})
+        store.enqueue({"job_id": "job-1", "job_type": "bulk_dissect", "source": "song"})
+
+        claimed = store.claim_batch([JobStage.DOWNLOAD], "worker-1", limit=2)
+
+        assert [job.id for job in claimed] == ["job-0", "job-1"]
+        assert all(job.status == JobStatus.PROCESSING for job in claimed)
+        assert all(job.worker_id == "worker-1" for job in claimed)
+        for job in claimed:
+            events = store.recent_events(job.id, limit=5)
+            claimed_events = [event for event in events if event["event_type"] == "claimed"]
+            assert claimed_events
+            assert claimed_events[0]["data"] == {"stage": "download", "worker_id": "worker-1"}
+
+
 def test_claim_batch_prioritizes_higher_priority_jobs():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
