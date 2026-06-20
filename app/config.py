@@ -81,6 +81,7 @@ class Settings:
     gpu_health_check_interval_seconds: float = _float_env("GPU_HEALTH_CHECK_INTERVAL_SECONDS", 60.0)
     gpu_health_restart_failures: int = _int_env("GPU_HEALTH_RESTART_FAILURES", 2)
     gpu_probe_cache_seconds: float = _float_env("GPU_PROBE_CACHE_SECONDS", 1.0)
+    gpu_job_sample_interval_seconds: float = _float_env("GPU_JOB_SAMPLE_INTERVAL_SECONDS", 0.5)
     library_precheck_enabled: bool = _bool_env("LIBRARY_PRECHECK_ENABLED", True)
     library_cache_idle_ttl_seconds: float = _float_env("LIBRARY_CACHE_IDLE_TTL_SECONDS", 600.0)
     library_cache_max_age_seconds: float = _float_env("LIBRARY_CACHE_MAX_AGE_SECONDS", 300.0)

@@ -12,6 +12,7 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
         "PROCESS_BATCH_SIZE",
         "POSTPROCESS_BATCH_SIZE",
         "WORKER_POLL_SECONDS",
+        "GPU_JOB_SAMPLE_INTERVAL_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -22,3 +23,4 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
     assert settings.process_workers == 4
     assert settings.process_batch_size == 1
     assert settings.worker_poll_seconds == 0.10
+    assert settings.gpu_job_sample_interval_seconds == 0.5

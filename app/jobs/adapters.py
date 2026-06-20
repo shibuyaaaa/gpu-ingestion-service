@@ -110,13 +110,10 @@ class DissectAdapter(JobAdapter):
         audio_path = job.artifacts["audio_path"]
         output_dir = Path(job.artifacts["work_dir"]) / "analysis"
         async with context.models.gpu_lock:
-            context.models.active_gpu_job_id = job.id
-            context.models.active_gpu_model = "all-in-one"
-            try:
+            with context.models.track_gpu_work(job_id=job.id, model_name="all-in-one") as gpu_usage:
                 result = await context.models.all_in_one.analyze(audio_path, output_dir)
-            finally:
-                context.models.active_gpu_job_id = None
-                context.models.active_gpu_model = None
+        analysis_timings = dict(result.get("timings") or {})
+        analysis_timings.update(gpu_usage.summary())
         analysis = result.get("analysis", {})
         segments = self._normalize_segments(analysis)
         chorus_segment = self._find_chorus_segment(segments)
@@ -126,7 +123,7 @@ class DissectAdapter(JobAdapter):
             full_stem_paths = await self._download_full_stems(full_stem_urls, Path(job.artifacts["work_dir"]))
         artifacts = {
             "analysis": analysis,
-            "analysis_timings": result.get("timings") or {},
+            "analysis_timings": analysis_timings,
             "analyzer_result_path": result.get("analyzer_result_path"),
             "analyzer_result_url": result.get("analyzer_result_url"),
             "full_stem_urls": full_stem_urls,
@@ -308,14 +305,10 @@ class DissectAdapter(JobAdapter):
                     raise RuntimeError("segment audio path was not prepared for HTDemucs processing")
                 started = time.perf_counter()
                 async with context.models.gpu_lock:
-                    context.models.active_gpu_job_id = job.id
-                    context.models.active_gpu_model = "htdemucs"
-                    try:
+                    with context.models.track_gpu_work(job_id=job.id, model_name="htdemucs") as gpu_usage:
                         stems = await context.models.htdemucs.separate(segment_path, stems_dir)
-                    finally:
-                        context.models.active_gpu_job_id = None
-                        context.models.active_gpu_model = None
                 timings["htdemucs_segment_seconds"] = round(time.perf_counter() - started, 6)
+                timings.update(gpu_usage.summary())
                 stem_source = "segment_htdemucs"
 
         selected_stems = dict(_filter_stems(stems, stem_group))

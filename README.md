@@ -83,6 +83,7 @@ run with `DRY_RUN_MODE=false`.
 - `ALL_IN_ONE_DEMUCS_SAVE_WORKERS`: CPU workers for saving Demucs stems after inference. Default: `2`.
 - `GPU_HEALTH_RESTART_*`: restart the service after repeated container GPU/NVML failures.
 - `GPU_PROBE_CACHE_SECONDS`: short cache for `nvidia-smi` ops probes. Default: `1.0`.
+- `GPU_JOB_SAMPLE_INTERVAL_SECONDS`: per-GPU-job `nvidia-smi` sampling interval for `/ops/timings`. Default: `0.5`; set `0` to disable. This is a coarse utilization proxy, not true FLOP MFU.
 - `DRY_RUN_MODE`: test/dev mode. Default: `false`.
 - `GCP_PROJECT_ID`, `GCP_BUCKET_NAME`, `CDN_BASE_URL`: GCP output config.
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`: required for Spotify link/name resolution.

@@ -1,10 +1,12 @@
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator
 
 from app.config import Settings
 from app.models.allinone import AllInOneRuntime
 from app.models.cloud_run_allinone import CloudRunAllInOneRuntime
-from app.models.gpu import GPUProbe
+from app.models.gpu import GPUProbe, GPUUsageSampler
 from app.models.htdemucs import HTDemucsRuntime
 from app.models.tuning import (
     PinnedAudioStager,
@@ -101,6 +103,21 @@ class ModelRuntimeBundle:
         async with self.gpu_lock:
             await self.htdemucs.load()
             await self.all_in_one.load()
+
+    @contextmanager
+    def track_gpu_work(self, *, job_id: str, model_name: str) -> Iterator[GPUUsageSampler]:
+        self.active_gpu_job_id = job_id
+        self.active_gpu_model = model_name
+        sampler = GPUUsageSampler(
+            self.gpu_probe,
+            interval_seconds=self.settings.gpu_job_sample_interval_seconds,
+        )
+        try:
+            with sampler:
+                yield sampler
+        finally:
+            self.active_gpu_job_id = None
+            self.active_gpu_model = None
 
     def status(self) -> dict:
         gpu = self.gpu_probe.snapshot().to_dict()
