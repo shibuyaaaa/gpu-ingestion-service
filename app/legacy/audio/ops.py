@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 from pathlib import Path
 
@@ -10,8 +11,7 @@ class AudioOps:
     async def convert_to_wav(input_path: str | Path, output_path: str | Path) -> str:
         await AudioOps._run_ffmpeg(
             [
-                "ffmpeg",
-                "-y",
+                *AudioOps._base_ffmpeg_cmd(),
                 "-i",
                 str(input_path),
                 "-ac",
@@ -27,8 +27,7 @@ class AudioOps:
     async def convert_to_mp3(input_path: str | Path, output_path: str | Path) -> str:
         await AudioOps._run_ffmpeg(
             [
-                "ffmpeg",
-                "-y",
+                *AudioOps._base_ffmpeg_cmd(),
                 "-i",
                 str(input_path),
                 "-codec:a",
@@ -50,8 +49,7 @@ class AudioOps:
     ) -> str:
         await AudioOps._run_ffmpeg(
             [
-                "ffmpeg",
-                "-y",
+                *AudioOps._base_ffmpeg_cmd(),
                 "-ss",
                 str(start),
                 "-i",
@@ -75,7 +73,7 @@ class AudioOps:
         if len(existing) == 1:
             shutil.copyfile(existing[0], output_path)
             return str(output_path)
-        cmd = ["ffmpeg", "-y"]
+        cmd = AudioOps._base_ffmpeg_cmd()
         for item in existing:
             cmd.extend(["-i", str(item)])
         cmd.extend(
@@ -101,3 +99,10 @@ class AudioOps:
         if proc.returncode != 0:
             raise RuntimeError(stderr.decode("utf-8", errors="replace")[-1000:])
 
+    @staticmethod
+    def _base_ffmpeg_cmd() -> list[str]:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        threads = os.getenv("FFMPEG_THREADS", "1").strip()
+        if threads and threads != "0":
+            cmd.extend(["-threads", str(max(1, int(threads)))])
+        return cmd

@@ -64,6 +64,7 @@ run with `DRY_RUN_MODE=false`.
 - `DOWNLOAD_WORKERS`, `DOWNLOAD_BATCH_SIZE`: local source/download workers.
 - `ANALYZE_BATCH_SIZE`: analyze-stage jobs per GPU loop. Default: `1` for one L4.
 - `PROCESS_WORKERS`, `PROCESS_BATCH_SIZE`: process-stage segment workers.
+- `FFMPEG_THREADS`: per-ffmpeg subprocess thread cap for CPU segment slicing/transcoding. Default: `1` to avoid oversubscribing a 4-vCPU L4 VM with multiple process workers.
 - `JOB_LEASE_TIMEOUT_SECONDS`: startup recovery timeout for crashed workers.
 - `WORK_DIR_CLEANUP_*`: terminal job workdir cleanup. The service removes only
   workdirs no non-terminal job still references.
