@@ -2,8 +2,19 @@ import asyncio
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 _FFMPEG_SEMAPHORES: dict[tuple[int, int], asyncio.Semaphore] = {}
+_FFMPEG_STATS: dict[str, float | int | None] = {
+    "configured_concurrency": None,
+    "active": 0,
+    "max_active": 0,
+    "total_calls": 0,
+    "total_wait_seconds": 0.0,
+    "total_run_seconds": 0.0,
+    "last_wait_seconds": 0.0,
+    "last_run_seconds": 0.0,
+}
 
 
 class AudioOps:
@@ -94,10 +105,30 @@ class AudioOps:
     async def _run_ffmpeg(cmd: list[str]) -> None:
         semaphore = AudioOps._ffmpeg_semaphore()
         if semaphore is None:
-            await AudioOps._run_ffmpeg_unbounded(cmd)
+            AudioOps._set_configured_concurrency()
+            await AudioOps._run_ffmpeg_tracked(cmd, wait_seconds=0.0)
             return
+        AudioOps._set_configured_concurrency()
+        wait_started = asyncio.get_running_loop().time()
         async with semaphore:
+            wait_seconds = asyncio.get_running_loop().time() - wait_started
+            await AudioOps._run_ffmpeg_tracked(cmd, wait_seconds=wait_seconds)
+
+    @staticmethod
+    async def _run_ffmpeg_tracked(cmd: list[str], *, wait_seconds: float) -> None:
+        _FFMPEG_STATS["total_calls"] = int(_FFMPEG_STATS["total_calls"] or 0) + 1
+        _FFMPEG_STATS["total_wait_seconds"] = float(_FFMPEG_STATS["total_wait_seconds"] or 0.0) + wait_seconds
+        _FFMPEG_STATS["last_wait_seconds"] = wait_seconds
+        _FFMPEG_STATS["active"] = int(_FFMPEG_STATS["active"] or 0) + 1
+        _FFMPEG_STATS["max_active"] = max(int(_FFMPEG_STATS["max_active"] or 0), int(_FFMPEG_STATS["active"] or 0))
+        run_started = asyncio.get_running_loop().time()
+        try:
             await AudioOps._run_ffmpeg_unbounded(cmd)
+        finally:
+            run_seconds = asyncio.get_running_loop().time() - run_started
+            _FFMPEG_STATS["total_run_seconds"] = float(_FFMPEG_STATS["total_run_seconds"] or 0.0) + run_seconds
+            _FFMPEG_STATS["last_run_seconds"] = run_seconds
+            _FFMPEG_STATS["active"] = max(0, int(_FFMPEG_STATS["active"] or 0) - 1)
 
     @staticmethod
     async def _run_ffmpeg_unbounded(cmd: list[str]) -> None:
@@ -120,13 +151,61 @@ class AudioOps:
 
     @staticmethod
     def _ffmpeg_semaphore() -> asyncio.Semaphore | None:
-        raw_limit = os.getenv("FFMPEG_CONCURRENCY", "4").strip()
-        if raw_limit in {"", "0"}:
+        limit = AudioOps._configured_ffmpeg_concurrency()
+        if limit is None:
             return None
-        limit = max(1, int(raw_limit))
         key = (id(asyncio.get_running_loop()), limit)
         semaphore = _FFMPEG_SEMAPHORES.get(key)
         if semaphore is None:
             semaphore = asyncio.Semaphore(limit)
             _FFMPEG_SEMAPHORES[key] = semaphore
         return semaphore
+
+    @staticmethod
+    def _configured_ffmpeg_concurrency() -> int | None:
+        raw_limit = os.getenv("FFMPEG_CONCURRENCY", "4").strip()
+        if raw_limit in {"", "0"}:
+            return None
+        return max(1, int(raw_limit))
+
+    @staticmethod
+    def _set_configured_concurrency() -> None:
+        configured = AudioOps._configured_ffmpeg_concurrency()
+        if configured is None:
+            _FFMPEG_STATS["configured_concurrency"] = None
+            return
+        _FFMPEG_STATS["configured_concurrency"] = configured
+
+    @staticmethod
+    def runtime_status() -> dict[str, Any]:
+        AudioOps._set_configured_concurrency()
+        total_calls = int(_FFMPEG_STATS["total_calls"] or 0)
+        total_wait = float(_FFMPEG_STATS["total_wait_seconds"] or 0.0)
+        total_run = float(_FFMPEG_STATS["total_run_seconds"] or 0.0)
+        return {
+            "configured_concurrency": _FFMPEG_STATS["configured_concurrency"],
+            "active": int(_FFMPEG_STATS["active"] or 0),
+            "max_active": int(_FFMPEG_STATS["max_active"] or 0),
+            "total_calls": total_calls,
+            "total_wait_seconds": round(total_wait, 6),
+            "total_run_seconds": round(total_run, 6),
+            "avg_wait_seconds": round(total_wait / total_calls, 6) if total_calls else 0.0,
+            "avg_run_seconds": round(total_run / total_calls, 6) if total_calls else 0.0,
+            "last_wait_seconds": round(float(_FFMPEG_STATS["last_wait_seconds"] or 0.0), 6),
+            "last_run_seconds": round(float(_FFMPEG_STATS["last_run_seconds"] or 0.0), 6),
+        }
+
+    @staticmethod
+    def reset_runtime_status() -> None:
+        _FFMPEG_STATS.update(
+            {
+                "configured_concurrency": None,
+                "active": 0,
+                "max_active": 0,
+                "total_calls": 0,
+                "total_wait_seconds": 0.0,
+                "total_run_seconds": 0.0,
+                "last_wait_seconds": 0.0,
+                "last_run_seconds": 0.0,
+            }
+        )

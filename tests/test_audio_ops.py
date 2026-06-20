@@ -91,3 +91,36 @@ async def test_ffmpeg_concurrency_limits_active_subprocesses(monkeypatch, tmp_pa
     )
 
     assert max_active == 2
+
+
+@pytest.mark.asyncio
+async def test_ffmpeg_runtime_status_tracks_wait_and_active_cap(monkeypatch, tmp_path):
+    AudioOps.reset_runtime_status()
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            await asyncio.sleep(0.01)
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*cmd, stdout, stderr):
+        return FakeProc()
+
+    monkeypatch.setenv("FFMPEG_CONCURRENCY", "2")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    await asyncio.gather(
+        *(
+            AudioOps.convert_to_mp3(tmp_path / f"input-{index}.wav", tmp_path / f"output-{index}.mp3")
+            for index in range(5)
+        )
+    )
+
+    status = AudioOps.runtime_status()
+    assert status["configured_concurrency"] == 2
+    assert status["active"] == 0
+    assert status["max_active"] == 2
+    assert status["total_calls"] == 5
+    assert status["total_run_seconds"] > 0
+    assert status["total_wait_seconds"] > 0

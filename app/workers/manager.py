@@ -11,6 +11,7 @@ from typing import Any
 
 from app.jobs import JobRegistry
 from app.jobs.context import JobContext
+from app.legacy.audio import AudioOps
 from app.queue import JobRecord, JobStage
 
 logger = logging.getLogger(__name__)
@@ -274,6 +275,7 @@ class WorkerManager:
                 "process_cpu_workers": self.context.settings.process_workers,
                 "process_cpu_batch_size": self.context.settings.process_batch_size,
                 "ffmpeg_concurrency": self.context.settings.ffmpeg_concurrency,
+                "ffmpeg_runtime": AudioOps.runtime_status(),
                 "worker_poll_seconds": self.context.settings.worker_poll_seconds,
                 "retry_delay_seconds": {
                     "download": self.context.settings.download_retry_delay_seconds,
