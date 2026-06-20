@@ -20,6 +20,18 @@ sudo nano /etc/gpu-ingestion.env
 sudo systemctl enable --now gpu-ingestion
 ```
 
+## Deploy On The VM
+
+From `/opt/gpu-ingestion-service` on the VM:
+
+```bash
+bash deploy/vm-deploy.sh
+```
+
+The script fast-forwards the repo, rebuilds `gpu-ingestion-service:local`,
+restarts the API and crawler units, waits for `/health`, then prunes dangling
+Docker images left by previous local builds.
+
 ## Health Checks
 
 ```bash
