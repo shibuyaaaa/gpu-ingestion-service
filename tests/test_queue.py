@@ -214,6 +214,9 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
                     "demix_total_seconds": 7.0,
                     "demix_apply_seconds": 5.0,
                     "demix_save_seconds": 2.0,
+                    "demix_segment_seconds": 7.5,
+                    "demix_segment_configured_seconds": 15.0,
+                    "demix_segment_max_seconds": 7.5,
                     "gpu_sample_count": 4,
                     "gpu_utilization_avg_pct": 61.5,
                     "gpu_memory_used_max_mb": 12000,
@@ -244,6 +247,9 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["completed_jobs_sampled"] == 2
         assert summary["analyze"]["count"] == 1
         assert summary["analyze"]["avg_seconds"]["demix_save_seconds"] == 2.0
+        assert summary["analyze"]["avg_seconds"]["demix_segment_seconds"] == 7.5
+        assert summary["analyze"]["avg_seconds"]["demix_segment_configured_seconds"] == 15.0
+        assert summary["analyze"]["avg_seconds"]["demix_segment_max_seconds"] == 7.5
         assert summary["analyze"]["avg_seconds"]["gpu_utilization_avg_pct"] == 61.5
         assert summary["analyze"]["avg_seconds"]["gpu_memory_used_max_mb"] == 12000.0
         assert summary["analyze"]["avg_seconds"]["processing_seconds"] is not None

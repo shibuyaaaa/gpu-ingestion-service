@@ -229,7 +229,7 @@ class AllInOneRuntime:
             "demucs": {
                 "model": _demucs_model_name(),
                 "backend": _demucs_backend(),
-                "segment_seconds": _demucs_segment_seconds_text(),
+                "segment": _demucs_segment_status(),
                 "jobs": os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0"),
                 "save_workers": _demucs_save_workers(),
                 "resident_cache_keys": list(_DEMUCS_MODEL_CACHE.keys()),
@@ -254,7 +254,8 @@ def _run_demucs_cli(paths: list[Path], demix_dir: Path, device: Any, demucs_mode
     ]
     if (static_models_dir / f"{demucs_model}.yaml").is_file():
         cmd.extend(["--repo", static_models_dir.as_posix()])
-    segment_seconds = _demucs_segment_seconds_text()
+    segment_status = _demucs_segment_status()
+    segment_seconds = segment_status["effective_text"]
     if segment_seconds:
         cmd.extend(["--segment", segment_seconds])
     jobs = os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0").strip()
@@ -266,6 +267,10 @@ def _run_demucs_cli(paths: list[Path], demix_dir: Path, device: Any, demucs_mode
     return {
         "demix_cli_seconds": _elapsed(started),
         "demix_track_count": len(paths),
+        "demix_segment_seconds": segment_status["effective_seconds"],
+        "demix_segment_configured_seconds": segment_status["configured_seconds"],
+        "demix_segment_max_seconds": segment_status["max_seconds"],
+        "demix_segment_clamped": segment_status["clamped"],
     }
 
 
@@ -287,7 +292,12 @@ def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs
     model = _resident_demucs_model(demucs_model, device, static_models_dir)
     timings["demix_model_ready_seconds"] = _elapsed(started)
     torch_device = torch.device(device)
-    segment = _demucs_segment_seconds()
+    segment_status = _demucs_segment_status()
+    segment = segment_status["effective_seconds"]
+    timings["demix_segment_seconds"] = segment_status["effective_seconds"]
+    timings["demix_segment_configured_seconds"] = segment_status["configured_seconds"]
+    timings["demix_segment_max_seconds"] = segment_status["max_seconds"]
+    timings["demix_segment_clamped"] = segment_status["clamped"]
     jobs = _int_env("ALL_IN_ONE_DEMUCS_JOBS", 0)
     for path in paths:
         path = Path(path)
@@ -395,6 +405,8 @@ def _resident_demucs_model(model_name: str, device: Any, static_models_dir: Path
 
 
 _DEMUCS_STEMS = ("bass", "drums", "other", "vocals")
+_DEMUCS_DEFAULT_SEGMENT_SECONDS = 7.5
+_DEMUCS_DEFAULT_MAX_SEGMENT_SECONDS = 7.5
 _DEMUCS_MODEL_CACHE: dict[str, Any] = {}
 _DEMUCS_MODEL_LOCK = threading.RLock()
 _ANALYZE_LOCAL = threading.local()
@@ -421,15 +433,35 @@ def _demucs_save_workers() -> int:
     return max(1, _int_env("ALL_IN_ONE_DEMUCS_SAVE_WORKERS", 2))
 
 
-def _demucs_segment_seconds_text() -> str:
-    return os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "7.5").strip()
+def _demucs_segment_status() -> dict[str, Any]:
+    configured_text = os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", str(_DEMUCS_DEFAULT_SEGMENT_SECONDS)).strip()
+    max_seconds = _float_env("ALL_IN_ONE_DEMUCS_MAX_SEGMENT_SECONDS", _DEMUCS_DEFAULT_MAX_SEGMENT_SECONDS)
+    configured_seconds = _parse_optional_float(configured_text)
+    effective_seconds = configured_seconds
+    clamped = False
+    if configured_seconds is not None and configured_seconds > max_seconds:
+        effective_seconds = max_seconds
+        clamped = True
+    return {
+        "configured_text": configured_text,
+        "configured_seconds": configured_seconds,
+        "effective_text": _format_optional_float(effective_seconds),
+        "effective_seconds": effective_seconds,
+        "max_seconds": max_seconds,
+        "clamped": clamped,
+    }
 
 
-def _demucs_segment_seconds() -> float | None:
-    value = _demucs_segment_seconds_text()
+def _parse_optional_float(value: str) -> float | None:
     if value == "":
         return None
     return float(value)
+
+
+def _format_optional_float(value: float | None) -> str:
+    if value is None:
+        return ""
+    return ("%f" % value).rstrip("0").rstrip(".")
 
 
 def _transfer_to_device(batch: Any, device: Any) -> Any:
@@ -462,13 +494,6 @@ def _float_env(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None or value.strip() == "":
         return default
-    return float(value)
-
-
-def _optional_float_env(name: str) -> float | None:
-    value = os.getenv(name)
-    if value is None or value.strip() == "":
-        return None
     return float(value)
 
 

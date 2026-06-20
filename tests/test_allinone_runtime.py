@@ -135,6 +135,37 @@ def test_memory_bounded_demix_allows_native_segment_default(tmp_path, monkeypatc
     assert "--segment" not in captured["cmd"]
 
 
+def test_memory_bounded_demix_clamps_unsafe_segment_limit(tmp_path, monkeypatch):
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"audio")
+    demix_dir = tmp_path / "demix"
+    captured = {}
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs_ft")
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_BACKEND", "cli")
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "15")
+
+    def fake_run(cmd, check):
+        captured["cmd"] = cmd
+        captured["check"] = check
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(allinone_module.subprocess, "run", fake_run)
+    allinone_module._ANALYZE_LOCAL.timings = {}
+
+    try:
+        AllInOneRuntime._memory_bounded_demix([audio_path], demix_dir, "cuda:0")
+        timings = dict(allinone_module._ANALYZE_LOCAL.timings)
+    finally:
+        allinone_module._ANALYZE_LOCAL.timings = None
+
+    assert captured["check"] is True
+    assert captured["cmd"][captured["cmd"].index("--segment") + 1] == "7.5"
+    assert timings["demix_segment_seconds"] == 7.5
+    assert timings["demix_segment_configured_seconds"] == 15.0
+    assert timings["demix_segment_max_seconds"] == 7.5
+    assert timings["demix_segment_clamped"] is True
+
+
 def test_memory_bounded_demix_uses_static_repo_when_model_yaml_exists(tmp_path, monkeypatch):
     audio_path = tmp_path / "input.wav"
     audio_path.write_bytes(b"audio")
