@@ -18,5 +18,5 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
 
     assert settings.download_workers == 2
     assert settings.download_batch_size == 1
-    assert settings.process_workers == 3
+    assert settings.process_workers == 4
     assert settings.process_batch_size == 1
