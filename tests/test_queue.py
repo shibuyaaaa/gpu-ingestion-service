@@ -305,6 +305,40 @@ def test_recent_timing_summary_caps_limit():
         assert summary["completed_jobs_sampled"] == 0
 
 
+def test_recent_timing_summary_keeps_download_timings_after_stage_progression():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        job, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        store.claim_next([JobStage.DOWNLOAD], "download-worker")
+        store.complete_stage(
+            job.id,
+            next_stage=JobStage.ANALYZE,
+            artifacts={
+                "download_timings": {
+                    "source_metadata_seconds": 0.2,
+                    "youtube_download_seconds": 1.5,
+                    "download_total_seconds": 1.9,
+                }
+            },
+        )
+        store.claim_next([JobStage.ANALYZE], "gpu")
+        store.complete_stage(
+            job.id,
+            next_stage=None,
+            artifacts={"analysis_timings": {"allin1_analyze_seconds": 10.0}},
+        )
+
+        summary = store.recent_timing_summary(limit=10)
+
+        assert summary["completed_jobs_sampled"] == 1
+        assert summary["download"]["count"] == 1
+        assert summary["download"]["avg_seconds"]["source_metadata_seconds"] == 0.2
+        assert summary["download"]["avg_seconds"]["youtube_download_seconds"] == 1.5
+        assert summary["download"]["avg_seconds"]["download_total_seconds"] == 1.9
+        assert summary["analyze"]["count"] == 1
+        assert summary["latest"][0]["stage"] == JobStage.ANALYZE.value
+
+
 def test_process_claim_order_prioritizes_chords_before_other_stems():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)

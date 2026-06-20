@@ -844,10 +844,14 @@ class JobStore:
         for row in rows:
             artifacts = json.loads(row["artifacts_json"] or "{}")
             durations = _job_duration_breakdown(row, event_times.get(str(row["id"]), {}))
+            download_stage_timings = artifacts.get("download_timings") or {}
+            if isinstance(download_stage_timings, dict) and download_stage_timings:
+                download_row = dict(download_stage_timings)
+                if row["stage"] == JobStage.DOWNLOAD.value:
+                    download_row.update(durations)
+                download_timings.append(download_row)
             if row["stage"] == JobStage.DOWNLOAD.value:
-                timings = artifacts.get("download_timings") or {}
-                if isinstance(timings, dict):
-                    download_timings.append({**timings, **durations})
+                timings = download_stage_timings
                 final_outputs = artifacts.get("final_outputs") or {}
                 latest.append(
                     {
