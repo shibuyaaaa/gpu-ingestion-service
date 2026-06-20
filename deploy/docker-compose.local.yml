@@ -22,6 +22,8 @@ services:
       WORK_DIR_CLEANUP_MAX_DIRS_PER_RUN: "100"
       SOURCE_AUDIO_CACHE_ENABLED: "true"
       SOURCE_AUDIO_CACHE_MAX_ENTRIES: "100"
+      ANALYSIS_CACHE_ENABLED: "true"
+      ANALYSIS_CACHE_MAX_ENTRIES: "4"
     ports:
       - "8080:8080"
     volumes:

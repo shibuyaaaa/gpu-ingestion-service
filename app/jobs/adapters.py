@@ -30,6 +30,7 @@ PROCESS_PRIORITY_BULK_OTHER = 100
 PROCESS_MODE_SEGMENT_CHORD = "segment_chord"
 PROCESS_MODE_SEGMENT_OTHER = "segment_other"
 _SOURCE_AUDIO_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+_ANALYSIS_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 
 
 class DissectAdapter(JobAdapter):
@@ -210,14 +211,102 @@ class DissectAdapter(JobAdapter):
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    async def _restore_cached_analysis(
+        self,
+        *,
+        cache_key: str | None,
+        output_dir: Path,
+        context: JobContext,
+    ) -> dict[str, Any] | None:
+        if not context.settings.analysis_cache_enabled or not cache_key:
+            return None
+        cache_dir = context.settings.work_dir / "analysis-cache" / _safe_job_part(cache_key)
+        lock = _analysis_cache_lock(cache_key)
+        wait_started = time.perf_counter()
+        async with lock:
+            wait_seconds = round(time.perf_counter() - wait_started, 6)
+            if not _analysis_cache_entry_complete(cache_dir):
+                return None
+            started = time.perf_counter()
+            restored = await asyncio.to_thread(_restore_analysis_cache_sync, cache_dir, output_dir)
+            timings = {
+                "analysis_cache_hit": 1,
+                "analysis_cache_wait_seconds": wait_seconds,
+                "analysis_cache_restore_seconds": round(time.perf_counter() - started, 6),
+                "allin1_analyze_seconds": 0.0,
+                "demix_total_seconds": 0.0,
+                "demix_apply_seconds": 0.0,
+                "stem_count": len(restored["stem_paths"]),
+            }
+            return {
+                "analysis": restored["analysis"],
+                "analyzer_result_path": restored["analyzer_result_path"],
+                "stem_paths": restored["stem_paths"],
+                "timings": timings,
+            }
+
+    async def _store_cached_analysis(
+        self,
+        *,
+        cache_key: str | None,
+        result: dict[str, Any],
+        context: JobContext,
+        timings: dict[str, Any],
+    ) -> None:
+        if not context.settings.analysis_cache_enabled or not cache_key:
+            return
+        stem_paths = result.get("stem_paths") or result.get("full_stem_paths") or {}
+        analyzer_result_path = result.get("analyzer_result_path")
+        if not analyzer_result_path or not _has_required_stems(stem_paths):
+            return
+
+        cache_root = context.settings.work_dir / "analysis-cache"
+        cache_dir = cache_root / _safe_job_part(cache_key)
+        lock = _analysis_cache_lock(cache_key)
+        wait_started = time.perf_counter()
+        async with lock:
+            wait_seconds = round(time.perf_counter() - wait_started, 6)
+            if _analysis_cache_entry_complete(cache_dir):
+                timings["analysis_cache_store_wait_seconds"] = wait_seconds
+                timings["analysis_cache_store_seconds"] = 0.0
+                return
+            started = time.perf_counter()
+            await asyncio.to_thread(
+                _store_analysis_cache_sync,
+                cache_root,
+                cache_dir,
+                analyzer_result_path,
+                stem_paths,
+                result.get("analysis") or {},
+            )
+            timings["analysis_cache_store_wait_seconds"] = wait_seconds
+            timings["analysis_cache_store_seconds"] = round(time.perf_counter() - started, 6)
+            timings["analysis_cache_hit"] = 0
+            await _prune_analysis_cache(cache_root, context.settings.analysis_cache_max_entries)
+
     async def analyze(self, job: JobRecord, context: JobContext) -> StageResult:
         audio_path = job.artifacts["audio_path"]
         output_dir = Path(job.artifacts["work_dir"]) / "analysis"
-        async with context.models.gpu_lock:
-            with context.models.track_gpu_work(job_id=job.id, model_name="all-in-one") as gpu_usage:
-                result = await context.models.all_in_one.analyze(audio_path, output_dir)
-        analysis_timings = dict(result.get("timings") or {})
-        analysis_timings.update(gpu_usage.summary())
+        cache_key = _analysis_cache_key(job.artifacts)
+        result = await self._restore_cached_analysis(
+            cache_key=cache_key,
+            output_dir=output_dir,
+            context=context,
+        )
+        if result is None:
+            async with context.models.gpu_lock:
+                with context.models.track_gpu_work(job_id=job.id, model_name="all-in-one") as gpu_usage:
+                    result = await context.models.all_in_one.analyze(audio_path, output_dir)
+            analysis_timings = dict(result.get("timings") or {})
+            analysis_timings.update(gpu_usage.summary())
+            await self._store_cached_analysis(
+                cache_key=cache_key,
+                result=result,
+                context=context,
+                timings=analysis_timings,
+            )
+        else:
+            analysis_timings = dict(result.get("timings") or {})
         analysis = result.get("analysis", {})
         segments = self._normalize_segments(analysis)
         chorus_segment = self._find_chorus_segment(segments)
@@ -1030,6 +1119,133 @@ def _truthy_payload_flag(job: JobRecord, key: str) -> bool:
     return bool(value)
 
 
+def _analysis_cache_key(artifacts: dict[str, Any]) -> str | None:
+    youtube_url = str(artifacts.get("youtube_url") or "")
+    video_id = extract_youtube_video_id(youtube_url)
+    if video_id:
+        return f"youtube-{video_id}"
+    match = artifacts.get("youtube_match") or {}
+    if isinstance(match, dict):
+        video_id = str(match.get("video_id") or "")
+        if video_id:
+            return f"youtube-{video_id}"
+    return None
+
+
+def _analysis_cache_lock(cache_key: str) -> asyncio.Lock:
+    key = (id(asyncio.get_running_loop()), cache_key)
+    lock = _ANALYSIS_CACHE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ANALYSIS_CACHE_LOCKS[key] = lock
+    return lock
+
+
+def _analysis_cache_entry_complete(cache_dir: Path) -> bool:
+    if not cache_dir.is_dir():
+        return False
+    if not (cache_dir / "metadata.json").is_file():
+        return False
+    if not (cache_dir / "analyzer_result.json").is_file():
+        return False
+    stems_dir = cache_dir / "stems"
+    return all((stems_dir / f"{stem}.wav").is_file() for stem in _REQUIRED_DEMUCS_STEMS)
+
+
+def _has_required_stems(stem_paths: dict[str, Any]) -> bool:
+    return all(stem in stem_paths and Path(str(stem_paths[stem])).is_file() for stem in _REQUIRED_DEMUCS_STEMS)
+
+
+def _restore_analysis_cache_sync(cache_dir: Path, output_dir: Path) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    analyzer_target = output_dir / "analyzer_result.json"
+    _link_or_copy(cache_dir / "analyzer_result.json", analyzer_target)
+    analysis = json.loads(analyzer_target.read_text(encoding="utf-8"))
+
+    stems_target = output_dir / "cached_full_stems"
+    stems_target.mkdir(parents=True, exist_ok=True)
+    stem_paths = {}
+    for stem in _REQUIRED_DEMUCS_STEMS:
+        target = stems_target / f"{stem}.wav"
+        _link_or_copy(cache_dir / "stems" / f"{stem}.wav", target)
+        stem_paths[stem] = str(target)
+    try:
+        os.utime(cache_dir / "metadata.json", None)
+    except OSError:
+        pass
+    return {"analysis": analysis, "analyzer_result_path": str(analyzer_target), "stem_paths": stem_paths}
+
+
+def _store_analysis_cache_sync(
+    cache_root: Path,
+    cache_dir: Path,
+    analyzer_result_path: str,
+    stem_paths: dict[str, Any],
+    analysis: dict[str, Any],
+) -> None:
+    cache_root.mkdir(parents=True, exist_ok=True)
+    tmp_dir = cache_root / ".tmp" / f"{cache_dir.name}-{os.getpid()}-{time.time_ns()}"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    stems_dir = tmp_dir / "stems"
+    stems_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        analyzer_source = Path(analyzer_result_path)
+        if analyzer_source.is_file():
+            _link_or_copy(analyzer_source, tmp_dir / "analyzer_result.json")
+        else:
+            (tmp_dir / "analyzer_result.json").write_text(json.dumps(analysis), encoding="utf-8")
+        for stem in _REQUIRED_DEMUCS_STEMS:
+            _link_or_copy(Path(str(stem_paths[stem])), stems_dir / f"{stem}.wav")
+        (tmp_dir / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "written_at": datetime.now(timezone.utc).isoformat(),
+                    "stems": list(_REQUIRED_DEMUCS_STEMS),
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        os.replace(tmp_dir, cache_dir)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _link_or_copy(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+
+
+async def _prune_analysis_cache(cache_root: Path, max_entries: int) -> None:
+    if max_entries <= 0:
+        return
+
+    def prune() -> None:
+        entries = []
+        paths = cache_root.iterdir() if cache_root.exists() else []
+        for path in paths:
+            if not path.is_dir() or path.name == ".tmp":
+                continue
+            metadata = path / "metadata.json"
+            try:
+                entries.append((metadata.stat().st_mtime, path))
+            except OSError:
+                entries.append((0.0, path))
+        entries.sort(reverse=True, key=lambda item: item[0])
+        for _, stale in entries[max_entries:]:
+            shutil.rmtree(stale, ignore_errors=True)
+
+    await asyncio.to_thread(prune)
+
+
 def _source_audio_cache_lock(video_id: str) -> asyncio.Lock:
     key = (id(asyncio.get_running_loop()), video_id)
     lock = _SOURCE_AUDIO_CACHE_LOCKS.get(key)
@@ -1056,6 +1272,9 @@ async def _prune_source_audio_cache(cache_dir: Path, max_entries: int) -> None:
                 pass
 
     await asyncio.to_thread(prune)
+
+
+_REQUIRED_DEMUCS_STEMS = ("bass", "drums", "other", "vocals")
 
 
 def _minimal_youtube_resolved(source: str) -> dict[str, Any]:

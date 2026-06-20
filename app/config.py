@@ -52,6 +52,8 @@ class Settings:
     work_dir_cleanup_max_dirs_per_run: int = _int_env("WORK_DIR_CLEANUP_MAX_DIRS_PER_RUN", 100)
     source_audio_cache_enabled: bool = _bool_env("SOURCE_AUDIO_CACHE_ENABLED", True)
     source_audio_cache_max_entries: int = _int_env("SOURCE_AUDIO_CACHE_MAX_ENTRIES", 100)
+    analysis_cache_enabled: bool = _bool_env("ANALYSIS_CACHE_ENABLED", True)
+    analysis_cache_max_entries: int = _int_env("ANALYSIS_CACHE_MAX_ENTRIES", 4)
     start_workers: bool = _bool_env("START_WORKERS", True)
     dry_run_mode: bool = _bool_env("DRY_RUN_MODE", False)
     model_backend: str = os.getenv("MODEL_BACKEND", "local").strip().lower()

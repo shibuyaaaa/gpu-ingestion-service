@@ -1,4 +1,6 @@
 import asyncio
+import json
+from contextlib import contextmanager
 import tempfile
 import uuid
 from pathlib import Path
@@ -482,6 +484,109 @@ async def test_direct_youtube_download_reuses_source_audio_cache(monkeypatch):
         assert first_result.artifacts["download_timings"]["youtube_download_seconds"] >= 0
         assert second_result.artifacts["download_timings"]["youtube_download_seconds"] == 0.0
         assert second_result.artifacts["download_timings"]["source_audio_cache_copy_seconds"] >= 0
+
+
+async def test_analyze_reuses_cached_all_in_one_outputs_for_same_youtube_source():
+    class FakeAllInOne:
+        def __init__(self):
+            self.calls = 0
+
+        async def analyze(self, audio_path, output_dir):
+            self.calls += 1
+            output = Path(output_dir)
+            output.mkdir(parents=True, exist_ok=True)
+            analysis = {
+                "duration": 30.0,
+                "segments": [{"id": "seg-0", "start": 0.0, "end": 10.0, "label": "chorus"}],
+            }
+            result_path = output / "result.json"
+            result_path.write_text(json.dumps(analysis), encoding="utf-8")
+            stems_dir = output / "fake_stems"
+            stems_dir.mkdir(parents=True, exist_ok=True)
+            stems = {}
+            for stem in ("bass", "drums", "other", "vocals"):
+                path = stems_dir / f"{stem}.wav"
+                path.write_bytes(f"{stem}-audio".encode())
+                stems[stem] = str(path)
+            return {
+                "analysis": analysis,
+                "analyzer_result_path": str(result_path),
+                "stem_paths": stems,
+                "timings": {"allin1_analyze_seconds": 12.0, "demix_total_seconds": 4.0},
+            }
+
+    class FakeGpuUsage:
+        def summary(self):
+            return {"gpu_utilization_avg_pct": 50.0}
+
+    class FakeModels:
+        def __init__(self):
+            self.gpu_lock = asyncio.Lock()
+            self.all_in_one = FakeAllInOne()
+
+        @contextmanager
+        def track_gpu_work(self, *, job_id, model_name):
+            yield FakeGpuUsage()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = Settings(
+            queue_db_path=Path(tmp) / "queue.sqlite3",
+            work_dir=Path(tmp) / "work",
+            dry_run_mode=False,
+            analysis_cache_enabled=True,
+            analysis_cache_max_entries=4,
+        )
+        store = JobStore(settings.queue_db_path, max_depth=20)
+        context = JobContext(
+            settings=settings,
+            store=store,
+            models=FakeModels(),
+            gcs=GCSClient(
+                project_id=settings.gcp_project_id,
+                bucket_name=settings.gcp_bucket_name,
+                cdn_base_url=settings.cdn_base_url,
+            ),
+            db=DBClient(database_url=""),
+            library=None,
+            library_writer=LibraryWriter(
+                db=DBClient(database_url=""),
+                settings=settings,
+                membership=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+            ),
+        )
+        jobs = []
+        for index in range(2):
+            work_dir = settings.work_dir / "jobs" / f"analysis-cache-{index}"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = work_dir / "input.wav"
+            audio_path.write_bytes(b"audio")
+            job, _ = store.enqueue(
+                {
+                    "job_id": f"analysis-cache-{index}",
+                    "job_type": "bulk_dissect",
+                    "source": "song",
+                },
+                initial_stage=JobStage.ANALYZE,
+                initial_artifacts={
+                    "work_dir": str(work_dir),
+                    "audio_path": str(audio_path),
+                    "source": "song",
+                    "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                },
+            )
+            jobs.append(job)
+
+        first = await BulkDissectAdapter().analyze(jobs[0], context)
+        second = await BulkDissectAdapter().analyze(jobs[1], context)
+
+        assert context.models.all_in_one.calls == 1
+        assert first.artifacts["analysis_timings"]["analysis_cache_hit"] == 0
+        assert first.artifacts["analysis_timings"]["allin1_analyze_seconds"] == 12.0
+        assert second.artifacts["analysis_timings"]["analysis_cache_hit"] == 1
+        assert second.artifacts["analysis_timings"]["allin1_analyze_seconds"] == 0.0
+        assert second.artifacts["analysis_timings"]["demix_total_seconds"] == 0.0
+        assert Path(second.artifacts["full_stem_paths"]["other"]).exists()
+        assert second.artifacts["fanout"]["child_count"] == 1
 
 
 async def test_missing_library_song_continues_download_stage(monkeypatch):
