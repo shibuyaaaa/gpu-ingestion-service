@@ -29,13 +29,17 @@ class DissectAdapter(JobAdapter):
     job_types: set[str] = set()
 
     async def download(self, job: JobRecord, context: JobContext) -> StageResult:
+        stage_started = time.perf_counter()
+        timings: dict[str, float] = {}
         source = self._source_from_payload(job.payload)
         work_dir = context.job_work_dir(job)
         work_dir.mkdir(parents=True, exist_ok=True)
 
         if context.settings.dry_run_mode:
+            started = time.perf_counter()
             source_path = work_dir / "source.wav"
             source_path.write_bytes(b"dry-run-audio")
+            timings["dry_run_source_write_seconds"] = round(time.perf_counter() - started, 6)
             resolved = {
                 "source": source,
                 "youtube_url": "dry-run://youtube",
@@ -46,21 +50,28 @@ class DissectAdapter(JobAdapter):
         else:
             payload_metadata = job.payload.get("spotify_metadata")
             if isinstance(payload_metadata, dict) and payload_metadata.get("title"):
+                timings["source_metadata_seconds"] = 0.0
                 resolved = {
                     "source": source,
                     "spotify_metadata": payload_metadata,
                 }
             else:
+                started = time.perf_counter()
                 resolved = await resolve_source_metadata(source)
+                timings["source_metadata_seconds"] = round(time.perf_counter() - started, 6)
             if _truthy_payload_flag(job, "skip_library_precheck"):
+                timings["library_precheck_seconds"] = 0.0
                 library_result = LibraryLookupResult(
                     checked=False,
                     exists=False,
                     source="skipped_by_job",
                 )
             else:
+                started = time.perf_counter()
                 library_result = await context.library.lookup(resolved.get("spotify_metadata"))
+                timings["library_precheck_seconds"] = round(time.perf_counter() - started, 6)
             if library_result.exists:
+                timings["download_total_seconds"] = round(time.perf_counter() - stage_started, 6)
                 return StageResult(
                     next_stage=None,
                     artifacts={
@@ -69,6 +80,7 @@ class DissectAdapter(JobAdapter):
                         "spotify_metadata": resolved.get("spotify_metadata"),
                         "youtube_match": resolved.get("youtube_match"),
                         "library_precheck": library_result.to_dict(),
+                        "download_timings": timings,
                         "final_outputs": {
                             "job_type": job.job_type.value,
                             "source": source,
@@ -79,16 +91,27 @@ class DissectAdapter(JobAdapter):
                         },
                     },
                 )
+            started = time.perf_counter()
             resolved = await resolve_youtube_match(resolved)
+            timings["youtube_match_seconds"] = round(time.perf_counter() - started, 6)
+            started = time.perf_counter()
             audio_path = await download_youtube_audio(resolved["youtube_url"], work_dir)
+            timings["youtube_download_seconds"] = round(time.perf_counter() - started, 6)
             source_path = Path(audio_path)
 
         wav_path = work_dir / "input.wav"
         if source_path.suffix.lower() in {".wav", ".wave"}:
             if source_path != wav_path:
+                started = time.perf_counter()
                 shutil.copyfile(source_path, wav_path)
+                timings["wav_copy_seconds"] = round(time.perf_counter() - started, 6)
+            else:
+                timings["wav_copy_seconds"] = 0.0
         else:
+            started = time.perf_counter()
             await AudioOps.convert_to_wav(source_path, wav_path)
+            timings["wav_convert_seconds"] = round(time.perf_counter() - started, 6)
+        timings["download_total_seconds"] = round(time.perf_counter() - stage_started, 6)
 
         return StageResult(
             next_stage=JobStage.ANALYZE,
@@ -101,6 +124,7 @@ class DissectAdapter(JobAdapter):
                 "spotify_metadata": resolved.get("spotify_metadata"),
                 "youtube_match": resolved.get("youtube_match"),
                 "library_precheck": library_result.to_dict() if not context.settings.dry_run_mode else None,
+                "download_timings": timings,
                 "skip_library_precheck": _truthy_payload_flag(job, "skip_library_precheck"),
                 "skip_library_write": _truthy_payload_flag(job, "skip_library_write"),
             },

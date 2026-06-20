@@ -822,21 +822,55 @@ class JobStore:
                 SELECT id, job_type, stage, priority, created_at, updated_at, artifacts_json
                 FROM jobs
                 WHERE status = ?
-                  AND stage IN (?, ?)
+                  AND stage IN (?, ?, ?)
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
-                (JobStatus.COMPLETED.value, JobStage.ANALYZE.value, JobStage.PROCESS.value, row_limit),
+                (
+                    JobStatus.COMPLETED.value,
+                    JobStage.DOWNLOAD.value,
+                    JobStage.ANALYZE.value,
+                    JobStage.PROCESS.value,
+                    row_limit,
+                ),
             ).fetchall()
             job_ids = [str(row["id"]) for row in rows]
             event_times = _latest_event_times(conn, job_ids)
 
+        download_timings: list[dict[str, Any]] = []
         analyze_timings: list[dict[str, Any]] = []
         process_timings_by_mode: dict[str, list[dict[str, Any]]] = {}
         latest: list[dict[str, Any]] = []
         for row in rows:
             artifacts = json.loads(row["artifacts_json"] or "{}")
             durations = _job_duration_breakdown(row, event_times.get(str(row["id"]), {}))
+            if row["stage"] == JobStage.DOWNLOAD.value:
+                timings = artifacts.get("download_timings") or {}
+                if isinstance(timings, dict):
+                    download_timings.append({**timings, **durations})
+                final_outputs = artifacts.get("final_outputs") or {}
+                latest.append(
+                    {
+                        "job_id": row["id"],
+                        "job_type": row["job_type"],
+                        "stage": row["stage"],
+                        "status": final_outputs.get("status"),
+                        **durations,
+                        "timings": _timing_subset(
+                            timings,
+                            [
+                                "source_metadata_seconds",
+                                "library_precheck_seconds",
+                                "youtube_match_seconds",
+                                "youtube_download_seconds",
+                                "wav_copy_seconds",
+                                "wav_convert_seconds",
+                                "download_total_seconds",
+                            ],
+                        ),
+                    }
+                )
+                continue
             if row["stage"] == JobStage.ANALYZE.value:
                 timings = artifacts.get("analysis_timings") or {}
                 if isinstance(timings, dict):
@@ -905,6 +939,22 @@ class JobStore:
         return {
             "limit": row_limit,
             "completed_jobs_sampled": len(rows),
+            "download": _aggregate_timing_rows(
+                download_timings,
+                [
+                    "source_metadata_seconds",
+                    "library_precheck_seconds",
+                    "youtube_match_seconds",
+                    "youtube_download_seconds",
+                    "wav_copy_seconds",
+                    "wav_convert_seconds",
+                    "dry_run_source_write_seconds",
+                    "download_total_seconds",
+                    "queue_wait_seconds",
+                    "processing_seconds",
+                    "duration_seconds",
+                ],
+            ),
             "analyze": _aggregate_timing_rows(
                 analyze_timings,
                 [

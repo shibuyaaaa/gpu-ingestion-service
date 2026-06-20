@@ -195,6 +195,10 @@ def test_active_depth_query_uses_partial_active_index():
 def test_recent_timing_summary_aggregates_analyze_and_process_timings():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        download, _ = store.enqueue(
+            {"job_id": "download", "job_type": "bulk_dissect", "source": "song"},
+            initial_stage=JobStage.DOWNLOAD,
+        )
         analyze, _ = store.enqueue(
             {"job_id": "analyze", "job_type": "bulk_dissect", "source": "song"},
             initial_stage=JobStage.ANALYZE,
@@ -203,6 +207,21 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
             {"job_id": "process", "job_type": "bulk_dissect", "source": "song"},
             initial_stage=JobStage.PROCESS,
             initial_artifacts={"process_mode": "segment_other", "segment_id": "seg-1"},
+        )
+        store.claim_next([JobStage.DOWNLOAD], "download-worker")
+        store.complete_stage(
+            download.id,
+            next_stage=None,
+            artifacts={
+                "download_timings": {
+                    "source_metadata_seconds": 0.5,
+                    "library_precheck_seconds": 0.25,
+                    "youtube_match_seconds": 1.0,
+                    "youtube_download_seconds": 2.0,
+                    "wav_copy_seconds": 0.1,
+                    "download_total_seconds": 3.85,
+                }
+            },
         )
         store.claim_next([JobStage.ANALYZE], "gpu")
         store.complete_stage(
@@ -244,7 +263,15 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
 
         summary = store.recent_timing_summary(limit=10)
 
-        assert summary["completed_jobs_sampled"] == 2
+        assert summary["completed_jobs_sampled"] == 3
+        assert summary["download"]["count"] == 1
+        assert summary["download"]["avg_seconds"]["source_metadata_seconds"] == 0.5
+        assert summary["download"]["avg_seconds"]["library_precheck_seconds"] == 0.25
+        assert summary["download"]["avg_seconds"]["youtube_match_seconds"] == 1.0
+        assert summary["download"]["avg_seconds"]["youtube_download_seconds"] == 2.0
+        assert summary["download"]["avg_seconds"]["download_total_seconds"] == 3.85
+        assert summary["download"]["avg_seconds"]["queue_wait_seconds"] is not None
+        assert summary["download"]["avg_seconds"]["processing_seconds"] is not None
         assert summary["analyze"]["count"] == 1
         assert summary["analyze"]["avg_seconds"]["demix_save_seconds"] == 2.0
         assert summary["analyze"]["avg_seconds"]["demix_segment_seconds"] == 7.5
@@ -259,12 +286,13 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gpu_memory_used_max_mb"] == 8000.0
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["queue_wait_seconds"] is not None
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["processing_seconds"] is not None
-        assert [item["job_id"] for item in summary["latest"]] == ["process", "analyze"]
+        assert [item["job_id"] for item in summary["latest"]] == ["process", "analyze", "download"]
         assert summary["latest"][0]["queue_wait_seconds"] is not None
         assert summary["latest"][0]["processing_seconds"] is not None
         assert summary["latest"][0]["duration_seconds"] >= summary["latest"][0]["processing_seconds"]
         assert summary["latest"][1]["queue_wait_seconds"] is not None
         assert summary["latest"][1]["processing_seconds"] is not None
+        assert summary["latest"][2]["timings"]["youtube_download_seconds"] == 2.0
 
 
 def test_recent_timing_summary_caps_limit():

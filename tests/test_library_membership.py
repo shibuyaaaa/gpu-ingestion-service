@@ -258,6 +258,9 @@ async def test_existing_library_song_completes_before_audio_download(monkeypatch
         assert result.next_stage is None
         assert result.artifacts["final_outputs"]["status"] == "skipped_existing_library_song"
         assert result.artifacts["library_precheck"]["song"]["id"] == "song-1"
+        assert result.artifacts["download_timings"]["source_metadata_seconds"] >= 0
+        assert result.artifacts["download_timings"]["library_precheck_seconds"] >= 0
+        assert result.artifacts["download_timings"]["download_total_seconds"] >= 0
 
 
 async def test_skip_library_precheck_forces_download_even_when_song_exists(monkeypatch):
@@ -327,6 +330,12 @@ async def test_skip_library_precheck_forces_download_even_when_song_exists(monke
         assert result.artifacts["library_precheck"]["source"] == "skipped_by_job"
         assert result.artifacts["skip_library_precheck"] is True
         assert result.artifacts["skip_library_write"] is True
+        assert result.artifacts["download_timings"]["source_metadata_seconds"] >= 0
+        assert result.artifacts["download_timings"]["library_precheck_seconds"] == 0.0
+        assert result.artifacts["download_timings"]["youtube_match_seconds"] >= 0
+        assert result.artifacts["download_timings"]["youtube_download_seconds"] >= 0
+        assert result.artifacts["download_timings"]["wav_copy_seconds"] >= 0
+        assert result.artifacts["download_timings"]["download_total_seconds"] >= 0
         assert Path(result.artifacts["audio_path"]).exists()
 
 
@@ -387,6 +396,10 @@ async def test_missing_library_song_continues_download_stage(monkeypatch):
 
         assert result.next_stage == JobStage.ANALYZE
         assert result.artifacts["library_precheck"]["source"] == "miss"
+        assert result.artifacts["download_timings"]["library_precheck_seconds"] >= 0
+        assert result.artifacts["download_timings"]["youtube_match_seconds"] >= 0
+        assert result.artifacts["download_timings"]["youtube_download_seconds"] >= 0
+        assert result.artifacts["download_timings"]["download_total_seconds"] >= 0
         assert Path(result.artifacts["audio_path"]).exists()
 
 
