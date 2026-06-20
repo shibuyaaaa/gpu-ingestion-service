@@ -230,6 +230,11 @@ async def ops_gpu() -> dict[str, Any]:
     return models.status()
 
 
+@app.get("/ops/timings")
+async def ops_timings(limit: int = 100) -> dict[str, Any]:
+    return store.recent_timing_summary(limit=limit)
+
+
 @app.post("/ops/jobs/{job_id}/retry")
 async def retry_job(job_id: str) -> dict[str, Any]:
     try:

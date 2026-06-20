@@ -192,6 +192,67 @@ def test_active_depth_query_uses_partial_active_index():
         assert "idx_jobs_active_depth" in detail
 
 
+def test_recent_timing_summary_aggregates_analyze_and_process_timings():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        analyze, _ = store.enqueue(
+            {"job_id": "analyze", "job_type": "bulk_dissect", "source": "song"},
+            initial_stage=JobStage.ANALYZE,
+        )
+        process, _ = store.enqueue(
+            {"job_id": "process", "job_type": "bulk_dissect", "source": "song"},
+            initial_stage=JobStage.PROCESS,
+            initial_artifacts={"process_mode": "segment_other", "segment_id": "seg-1"},
+        )
+        store.claim_next([JobStage.ANALYZE], "gpu")
+        store.complete_stage(
+            analyze.id,
+            next_stage=None,
+            artifacts={
+                "analysis_timings": {
+                    "allin1_analyze_seconds": 10.0,
+                    "demix_total_seconds": 7.0,
+                    "demix_apply_seconds": 5.0,
+                    "demix_save_seconds": 2.0,
+                    "stem_count": 4,
+                }
+            },
+        )
+        store.claim_next([JobStage.PROCESS], "cpu")
+        store.complete_stage(
+            process.id,
+            next_stage=None,
+            artifacts={
+                "final_outputs": {"process_mode": "segment_other", "segment_id": "seg-1"},
+                "segment_result": {
+                    "timings": {
+                        "stem_segment_extract_seconds": 1.25,
+                        "upload_and_publish_seconds": 0.75,
+                    }
+                },
+            },
+        )
+
+        summary = store.recent_timing_summary(limit=10)
+
+        assert summary["completed_jobs_sampled"] == 2
+        assert summary["analyze"]["count"] == 1
+        assert summary["analyze"]["avg_seconds"]["demix_save_seconds"] == 2.0
+        assert summary["process_by_mode"]["segment_other"]["count"] == 1
+        assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["stem_segment_extract_seconds"] == 1.25
+        assert [item["job_id"] for item in summary["latest"]] == ["process", "analyze"]
+
+
+def test_recent_timing_summary_caps_limit():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+
+        summary = store.recent_timing_summary(limit=5000)
+
+        assert summary["limit"] == 1000
+        assert summary["completed_jobs_sampled"] == 0
+
+
 def test_process_claim_order_prioritizes_chords_before_other_stems():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)

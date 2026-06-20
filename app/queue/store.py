@@ -814,6 +814,111 @@ class JobStore:
             "backpressure": sum(by_stage.values()) >= self.max_depth,
         }
 
+    def recent_timing_summary(self, *, limit: int = 100) -> dict[str, Any]:
+        row_limit = max(1, min(int(limit), 1000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, job_type, stage, priority, created_at, updated_at, artifacts_json
+                FROM jobs
+                WHERE status = ?
+                  AND stage IN (?, ?)
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (JobStatus.COMPLETED.value, JobStage.ANALYZE.value, JobStage.PROCESS.value, row_limit),
+            ).fetchall()
+
+        analyze_timings: list[dict[str, Any]] = []
+        process_timings_by_mode: dict[str, list[dict[str, Any]]] = {}
+        latest: list[dict[str, Any]] = []
+        for row in rows:
+            artifacts = json.loads(row["artifacts_json"] or "{}")
+            duration = max(0.0, float(row["updated_at"] or 0.0) - float(row["created_at"] or 0.0))
+            if row["stage"] == JobStage.ANALYZE.value:
+                timings = artifacts.get("analysis_timings") or {}
+                if isinstance(timings, dict):
+                    analyze_timings.append(timings)
+                latest.append(
+                    {
+                        "job_id": row["id"],
+                        "job_type": row["job_type"],
+                        "stage": row["stage"],
+                        "duration_seconds": round(duration, 6),
+                        "timings": _timing_subset(
+                            timings,
+                            [
+                                "allin1_analyze_seconds",
+                                "demix_total_seconds",
+                                "demix_apply_seconds",
+                                "demix_save_seconds",
+                                "stem_count",
+                            ],
+                        ),
+                    }
+                )
+                continue
+
+            segment_result = artifacts.get("segment_result") or {}
+            final_outputs = artifacts.get("final_outputs") or {}
+            process_mode = str(
+                final_outputs.get("process_mode")
+                or artifacts.get("process_mode")
+                or "unknown"
+            )
+            timings = segment_result.get("timings") or {}
+            if isinstance(timings, dict):
+                process_timings_by_mode.setdefault(process_mode, []).append(timings)
+            latest.append(
+                {
+                    "job_id": row["id"],
+                    "job_type": row["job_type"],
+                    "stage": row["stage"],
+                    "process_mode": process_mode,
+                    "segment_id": final_outputs.get("segment_id") or artifacts.get("segment_id"),
+                    "duration_seconds": round(duration, 6),
+                    "timings": _timing_subset(
+                        timings,
+                        [
+                            "htdemucs_segment_seconds",
+                            "stem_segment_extract_seconds",
+                            "source_segment_extract_seconds",
+                            "upload_and_publish_seconds",
+                        ],
+                    ),
+                }
+            )
+
+        return {
+            "limit": row_limit,
+            "completed_jobs_sampled": len(rows),
+            "analyze": _aggregate_timing_rows(
+                analyze_timings,
+                [
+                    "allin1_analyze_seconds",
+                    "demix_total_seconds",
+                    "demix_apply_seconds",
+                    "demix_save_seconds",
+                    "demix_audio_read_seconds",
+                    "demix_pin_seconds",
+                    "demix_transfer_seconds",
+                ],
+            ),
+            "process_by_mode": {
+                mode: _aggregate_timing_rows(
+                    timings,
+                    [
+                        "htdemucs_segment_seconds",
+                        "stem_segment_extract_seconds",
+                        "source_segment_extract_seconds",
+                        "upload_and_publish_seconds",
+                    ],
+                )
+                for mode, timings in sorted(process_timings_by_mode.items())
+            },
+            "latest": latest[: min(20, row_limit)],
+        }
+
     def recent_events(self, job_id: str, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -949,6 +1054,23 @@ def _stage_value(stage: JobStage | str) -> str:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, default=str)
+
+
+def _aggregate_timing_rows(rows: list[dict[str, Any]], keys: list[str]) -> dict[str, Any]:
+    aggregates: dict[str, Any] = {"count": len(rows), "avg_seconds": {}, "max_seconds": {}}
+    for key in keys:
+        values = [float(row[key]) for row in rows if isinstance(row.get(key), int | float)]
+        if not values:
+            continue
+        aggregates["avg_seconds"][key] = round(sum(values) / len(values), 6)
+        aggregates["max_seconds"][key] = round(max(values), 6)
+    return aggregates
+
+
+def _timing_subset(timings: Any, keys: list[str]) -> dict[str, Any]:
+    if not isinstance(timings, dict):
+        return {}
+    return {key: timings[key] for key in keys if key in timings}
 
 
 def _add_event_conn(
