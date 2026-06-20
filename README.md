@@ -27,6 +27,10 @@ replay. `POST /pubsub` remains available only as a compatibility receiver for
 legacy/shadow traffic. Once a request is committed to SQLite, the local worker
 scheduler owns the job lifecycle.
 
+For production smoke tests, include `skip_library_precheck: true` and
+`skip_library_write: true` in the job payload. That forces real processing while
+preventing Aime library rows from being created or updated.
+
 The only canonical job types are:
 
 ```text

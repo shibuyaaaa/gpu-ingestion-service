@@ -36,6 +36,47 @@ def test_library_publish_result_serializes_uuid_rows():
     assert result.to_dict()["inserted_stems"][0]["id"] == str(stem_id)
 
 
+async def test_library_writer_skips_db_when_job_requests_no_library_write():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = Settings(
+            queue_db_path=Path(tmp) / "queue.sqlite3",
+            work_dir=Path(tmp) / "work",
+            dry_run_mode=False,
+        )
+        store = JobStore(settings.queue_db_path)
+        job, _ = store.enqueue(
+            {
+                "job_id": "skip-write",
+                "job_type": "bulk_dissect",
+                "source": "song",
+                "skip_library_write": True,
+            }
+        )
+        writer = LibraryWriter(
+            db=DBClient(database_url=""),
+            settings=settings,
+            membership=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        )
+
+        published = await writer.publish_segment(
+            job=job,
+            segment={"id": "seg-1", "start": 0.0, "end": 10.0, "label": "chorus"},
+            segment_result={"outputs": {"other": "https://cdn.test/chord.mp3"}},
+            status="partial",
+        )
+        completed = await writer.mark_complete(job=job)
+
+        assert published.to_dict() == {
+            "enabled": False,
+            "song_id": None,
+            "status": "skipped_by_job",
+            "inserted_stems": [],
+            "error": None,
+        }
+        assert completed.status == "skipped_by_job"
+        assert completed.enabled is False
+
+
 class FakeDB:
     def __init__(self, batches: list[list[dict]], *, delay: float = 0.0, fail: bool = False):
         self.batches = list(batches)
@@ -217,6 +258,76 @@ async def test_existing_library_song_completes_before_audio_download(monkeypatch
         assert result.next_stage is None
         assert result.artifacts["final_outputs"]["status"] == "skipped_existing_library_song"
         assert result.artifacts["library_precheck"]["song"]["id"] == "song-1"
+
+
+async def test_skip_library_precheck_forces_download_even_when_song_exists(monkeypatch):
+    async def fake_resolve_metadata(source: str):
+        return {
+            "source": source,
+            "spotify_metadata": {"title": "One More Time", "artist": "Daft Punk"},
+        }
+
+    async def fake_youtube_match(resolved: dict):
+        return {
+            **resolved,
+            "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "youtube_match": {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        }
+
+    async def fake_download(youtube_url: str, output_dir: str | Path):
+        target = Path(output_dir) / "source.wav"
+        target.write_bytes(b"audio")
+        return str(target)
+
+    class ForbiddenLibrary:
+        async def lookup(self, metadata):
+            raise AssertionError("library lookup should be skipped")
+
+    monkeypatch.setattr("app.jobs.adapters.resolve_source_metadata", fake_resolve_metadata)
+    monkeypatch.setattr("app.jobs.adapters.resolve_youtube_match", fake_youtube_match)
+    monkeypatch.setattr("app.jobs.adapters.download_youtube_audio", fake_download)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = Settings(
+            queue_db_path=Path(tmp) / "queue.sqlite3",
+            work_dir=Path(tmp) / "work",
+            dry_run_mode=False,
+        )
+        store = JobStore(settings.queue_db_path)
+        job, _ = store.enqueue(
+            {
+                "job_id": "force-download",
+                "job_type": "bulk_dissect",
+                "source": "One More Time",
+                "skip_library_precheck": True,
+                "skip_library_write": True,
+            }
+        )
+        context = JobContext(
+            settings=settings,
+            store=store,
+            models=None,
+            gcs=GCSClient(
+                project_id=settings.gcp_project_id,
+                bucket_name=settings.gcp_bucket_name,
+                cdn_base_url=settings.cdn_base_url,
+            ),
+            db=DBClient(database_url=""),
+            library=ForbiddenLibrary(),
+            library_writer=LibraryWriter(
+                db=DBClient(database_url=""),
+                settings=settings,
+                membership=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+            ),
+        )
+
+        result = await BulkDissectAdapter().download(job, context)
+
+        assert result.next_stage == JobStage.ANALYZE
+        assert result.artifacts["library_precheck"]["source"] == "skipped_by_job"
+        assert result.artifacts["skip_library_precheck"] is True
+        assert result.artifacts["skip_library_write"] is True
+        assert Path(result.artifacts["audio_path"]).exists()
 
 
 async def test_missing_library_song_continues_download_stage(monkeypatch):

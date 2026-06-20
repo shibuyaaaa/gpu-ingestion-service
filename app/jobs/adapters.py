@@ -10,6 +10,7 @@ import httpx
 
 from app.jobs.base import JobAdapter, StageResult
 from app.jobs.context import JobContext
+from app.library_membership import LibraryLookupResult
 from app.legacy.audio import AudioOps
 from app.legacy.utils.source import download_youtube_audio, resolve_source_metadata, resolve_youtube_match
 from app.queue import JobRecord, JobStage, JobType
@@ -51,7 +52,14 @@ class DissectAdapter(JobAdapter):
                 }
             else:
                 resolved = await resolve_source_metadata(source)
-            library_result = await context.library.lookup(resolved.get("spotify_metadata"))
+            if _truthy_payload_flag(job, "skip_library_precheck"):
+                library_result = LibraryLookupResult(
+                    checked=False,
+                    exists=False,
+                    source="skipped_by_job",
+                )
+            else:
+                library_result = await context.library.lookup(resolved.get("spotify_metadata"))
             if library_result.exists:
                 return StageResult(
                     next_stage=None,
@@ -93,6 +101,8 @@ class DissectAdapter(JobAdapter):
                 "spotify_metadata": resolved.get("spotify_metadata"),
                 "youtube_match": resolved.get("youtube_match"),
                 "library_precheck": library_result.to_dict() if not context.settings.dry_run_mode else None,
+                "skip_library_precheck": _truthy_payload_flag(job, "skip_library_precheck"),
+                "skip_library_write": _truthy_payload_flag(job, "skip_library_write"),
             },
         )
 
@@ -179,6 +189,7 @@ class DissectAdapter(JobAdapter):
                         "process_mode": PROCESS_MODE_SEGMENT_CHORD,
                         "process_group": process_group,
                         "segment_id": segment_id,
+                        "skip_library_write": _truthy_payload_flag(job, "skip_library_write"),
                     },
                     "artifacts": {
                         **self._base_process_artifacts(job, artifacts),
@@ -239,6 +250,10 @@ class DissectAdapter(JobAdapter):
             "segments": artifacts.get("segments", []),
             "chorus_segment": artifacts.get("chorus_segment"),
             "skip_segment_ids": artifacts.get("skip_segment_ids", []),
+            "skip_library_precheck": job.artifacts.get("skip_library_precheck")
+            or job.payload.get("skip_library_precheck"),
+            "skip_library_write": job.artifacts.get("skip_library_write")
+            or job.payload.get("skip_library_write"),
         }
 
     async def _process_segment(
@@ -545,6 +560,7 @@ class DissectAdapter(JobAdapter):
                 "process_mode": PROCESS_MODE_SEGMENT_OTHER,
                 "process_group": process_group,
                 "segment_id": str(segment["id"]),
+                "skip_library_write": _truthy_payload_flag(job, "skip_library_write"),
             },
             artifacts={
                 **self._base_process_artifacts(job, job.artifacts),
@@ -788,6 +804,10 @@ class QuickDissectAdapter(DissectAdapter):
                 "chorus_segment": chorus_segment,
                 "skip_segment_ids": [str(chorus_segment["id"])],
                 "processed_segments": {},
+                "skip_library_precheck": job.artifacts.get("skip_library_precheck")
+                or job.payload.get("skip_library_precheck"),
+                "skip_library_write": job.artifacts.get("skip_library_write")
+                or job.payload.get("skip_library_write"),
             },
         )
 
@@ -908,3 +928,10 @@ def _should_skip_segment_processing(segment: dict[str, Any]) -> bool:
     label = str(segment.get("label") or "").lower()
     duration = float(segment.get("end") or 0.0) - float(segment.get("start") or 0.0)
     return label in {"start", "end", "silence"} or duration < 5.0
+
+
+def _truthy_payload_flag(job: JobRecord, key: str) -> bool:
+    value = job.payload.get(key, job.artifacts.get(key))
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)

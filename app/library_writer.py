@@ -43,6 +43,8 @@ class LibraryWriter:
     ) -> LibraryPublishResult:
         if not self.enabled:
             return LibraryPublishResult(enabled=False)
+        if _skip_library_write(job):
+            return LibraryPublishResult(enabled=False, status="skipped_by_job")
         outputs = segment_result.get("outputs") or {}
         publishable = {
             _canonical_stem_type(stem): url
@@ -87,6 +89,8 @@ class LibraryWriter:
     async def mark_complete(self, *, job: JobRecord) -> LibraryPublishResult:
         if not self.enabled:
             return LibraryPublishResult(enabled=False)
+        if _skip_library_write(job):
+            return LibraryPublishResult(enabled=False, status="skipped_by_job")
         try:
             pool = await self.db.pool()
             async with pool.acquire() as conn:
@@ -414,6 +418,13 @@ def _analysis_payload(job: JobRecord, *, status: str) -> dict[str, Any]:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
     }
+
+
+def _skip_library_write(job: JobRecord) -> bool:
+    value = job.payload.get("skip_library_write", job.artifacts.get("skip_library_write"))
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _safe_json(value: str | None) -> dict[str, Any]:
