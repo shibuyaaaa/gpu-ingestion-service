@@ -820,6 +820,95 @@ async def test_segment_stem_cache_reuses_sliced_full_stem_segments(monkeypatch, 
     assert Path(second["stem_paths"]["vocals"]).exists()
 
 
+async def test_segment_stem_cache_reuses_partial_stems_and_extracts_only_misses(monkeypatch, tmp_path):
+    extracted = []
+
+    async def fake_extract_stem_segments(full_stem_paths, output_dir, segment):
+        extracted.append(set(full_stem_paths))
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        paths = {}
+        for stem in full_stem_paths:
+            path = output / f"{stem}.mp3"
+            path.write_bytes(f"{stem}-segment".encode())
+            paths[stem] = str(path)
+        return paths
+
+    class FakeGCS:
+        async def exists(self, gcs_path):
+            return False
+
+        async def upload(self, local_path, gcs_path, *, content_type):
+            return f"https://cdn.test/{Path(gcs_path).name}"
+
+    class FakeWriter:
+        async def publish_segment(self, *, job, segment, segment_result, status):
+            return LibraryPublishResult(enabled=True, song_id="song-1", status=status)
+
+    monkeypatch.setattr(BulkDissectAdapter, "_extract_stem_segments", staticmethod(fake_extract_stem_segments))
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+        segment_stem_cache_enabled=True,
+        gcs_segment_upload_cache_enabled=False,
+    )
+    store = JobStore(settings.queue_db_path)
+    context = JobContext(
+        settings=settings,
+        store=store,
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=FakeWriter(),
+    )
+    job, _ = store.enqueue({"job_id": "segment-partial-cache", "job_type": "bulk_dissect", "source": "song"})
+    work_dir = tmp_path / "work" / "jobs" / job.id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    store.complete_stage(
+        job.id,
+        next_stage=JobStage.PROCESS,
+        artifacts={
+            "work_dir": str(work_dir),
+            "audio_path": str(tmp_path / "source.wav"),
+            "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "full_stem_paths": {
+                "other": "unused-other",
+                "vocals": "unused-vocals",
+                "drums": "unused-drums",
+                "bass": "unused-bass",
+            },
+        },
+    )
+    job = store.get(job.id)
+    segment = {"id": "seg-1", "start": 0.0, "end": 8.0, "label": "chorus"}
+
+    chord = await BulkDissectAdapter()._process_segment(
+        job,
+        context,
+        segment,
+        output_prefix="segments",
+        stem_group="chord",
+    )
+    other = await BulkDissectAdapter()._process_segment(
+        job,
+        context,
+        segment,
+        output_prefix="segments",
+        stem_group="all",
+    )
+
+    assert extracted == [{"other"}, {"vocals", "drums", "bass"}]
+    assert chord["timings"]["segment_stem_cache_hit"] == 0
+    assert other["timings"]["segment_stem_cache_hit"] == 0
+    assert other["timings"]["segment_stem_cache_partial_hit"] == 1
+    assert other["timings"]["segment_stem_cache_partial_hit_count"] == 1
+    assert set(other["stem_paths"]) == {"other", "vocals", "drums", "bass"}
+    assert Path(other["stem_paths"]["other"]).exists()
+
+
 async def test_cached_segment_upload_reuses_existing_gcs_object(monkeypatch, tmp_path):
     from app.jobs import adapters
 

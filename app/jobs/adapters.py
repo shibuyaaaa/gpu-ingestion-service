@@ -573,26 +573,36 @@ class DissectAdapter(JobAdapter):
                 stems_to_extract = dict(_filter_stems(full_stem_paths, stem_group))
                 segment_cache_key = _segment_stem_cache_key(job.artifacts, segment)
                 started = time.perf_counter()
-                stems = await _restore_cached_segment_stems(
+                cached_stems, missing_stem_names = await _restore_cached_segment_stems(
                     cache_key=segment_cache_key,
                     requested_stems=stems_to_extract.keys(),
                     output_dir=stems_dir,
                     context=context,
                 )
-                if stems is not None:
+                if not missing_stem_names:
+                    stems = cached_stems
                     timings["segment_stem_cache_hit"] = 1
                     timings["segment_stem_cache_restore_seconds"] = round(time.perf_counter() - started, 6)
                     timings["stem_segment_extract_seconds"] = 0.0
                     stem_source = "segment_stem_cache"
                 else:
                     timings["segment_stem_cache_hit"] = 0
+                    if cached_stems:
+                        timings["segment_stem_cache_partial_hit"] = 1
+                        timings["segment_stem_cache_partial_hit_count"] = len(cached_stems)
+                    missing_to_extract = {
+                        stem: path
+                        for stem, path in stems_to_extract.items()
+                        if stem in set(missing_stem_names)
+                    }
                     started = time.perf_counter()
-                    stems = await self._extract_stem_segments(stems_to_extract, stems_dir, segment)
+                    extracted_stems = await self._extract_stem_segments(missing_to_extract, stems_dir, segment)
                     timings["stem_segment_extract_seconds"] = round(time.perf_counter() - started, 6)
+                    stems = {**cached_stems, **extracted_stems}
                     store_started = time.perf_counter()
                     await _store_cached_segment_stems(
                         cache_key=segment_cache_key,
-                        stems=stems,
+                        stems=extracted_stems,
                         context=context,
                     )
                     timings["segment_stem_cache_store_seconds"] = round(time.perf_counter() - store_started, 6)
@@ -1538,30 +1548,34 @@ async def _restore_cached_segment_stems(
     requested_stems: Any,
     output_dir: Path,
     context: JobContext,
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str], list[str]]:
     if not context.settings.segment_stem_cache_enabled or not cache_key:
-        return None
+        stem_names = [str(stem) for stem in requested_stems]
+        return {}, stem_names
     stem_names = [str(stem) for stem in requested_stems]
     if not stem_names:
-        return {}
+        return {}, []
     cache_dir = context.settings.work_dir / "segment-stem-cache" / _safe_job_part(cache_key)
     lock = _segment_stem_cache_lock(cache_key)
     async with lock:
-        if not all((cache_dir / f"{stem}.mp3").is_file() for stem in stem_names):
-            return None
         output_dir.mkdir(parents=True, exist_ok=True)
         stems = {}
+        missing = []
         for stem in stem_names:
+            cached = cache_dir / f"{stem}.mp3"
+            if not cached.is_file():
+                missing.append(stem)
+                continue
             target = output_dir / f"{stem}.mp3"
-            _link_or_copy(cache_dir / f"{stem}.mp3", target)
+            _link_or_copy(cached, target)
             stems[stem] = str(target)
         metadata = cache_dir / "metadata.json"
-        if metadata.exists():
+        if stems and metadata.exists():
             try:
                 os.utime(metadata, None)
             except OSError:
                 pass
-        return stems
+        return stems, missing
 
 
 async def _store_cached_segment_stems(
