@@ -3,7 +3,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -488,86 +488,137 @@ class JobStore:
         artifacts: dict[str, Any] | None = None,
     ) -> JobRecord:
         now = time.time()
-        record = self.get(job_id)
-        if record is None:
-            raise KeyError(job_id)
-        merged_artifacts = {**record.artifacts, **(artifacts or {})}
-        status = JobStatus.COMPLETED if next_stage is None else JobStatus.QUEUED
-        stage = record.stage if next_stage is None else JobStage(str(next_stage))
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET stage = ?,
-                    status = ?,
-                    artifacts_json = ?,
-                    worker_id = NULL,
-                    error = NULL,
-                    updated_at = ?,
-                    available_at = ?
-                WHERE id = ?
-                """,
-                (stage.value, status.value, _json_dumps(merged_artifacts), now, now, job_id),
-            )
-        self.add_event(
-            job_id,
-            JobEventType.STAGE_COMPLETED,
-            data={"next_stage": next_stage.value if isinstance(next_stage, JobStage) else next_stage},
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if row is None:
+                    conn.execute("ROLLBACK")
+                    raise KeyError(job_id)
+                record = self._row_to_record(row)
+                merged_artifacts = {**record.artifacts, **(artifacts or {})}
+                artifacts_json = _json_dumps(merged_artifacts)
+                normalized_artifacts = json.loads(artifacts_json)
+                status = JobStatus.COMPLETED if next_stage is None else JobStatus.QUEUED
+                stage = record.stage if next_stage is None else JobStage(str(next_stage))
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET stage = ?,
+                        status = ?,
+                        artifacts_json = ?,
+                        worker_id = NULL,
+                        error = NULL,
+                        updated_at = ?,
+                        available_at = ?
+                    WHERE id = ?
+                    """,
+                    (stage.value, status.value, artifacts_json, now, now, job_id),
+                )
+                _add_event_conn(
+                    conn,
+                    job_id,
+                    JobEventType.STAGE_COMPLETED,
+                    created_at=now,
+                    data={"next_stage": next_stage.value if isinstance(next_stage, JobStage) else next_stage},
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        return replace(
+            record,
+            stage=stage,
+            status=status,
+            artifacts=normalized_artifacts,
+            worker_id=None,
+            error=None,
+            updated_at=now,
+            available_at=now,
         )
-        updated = self.get(job_id)
-        if updated is None:
-            raise KeyError(job_id)
-        return updated
 
     def fail_stage(self, job_id: str, error: str, *, retry_delay_seconds: int = 30) -> JobRecord:
         now = time.time()
-        record = self.get(job_id)
-        if record is None:
-            raise KeyError(job_id)
-        next_attempts = record.attempts + 1
-        retry = next_attempts < record.max_attempts
-        status = JobStatus.QUEUED if retry else JobStatus.FAILED
-        available_at = now + retry_delay_seconds if retry else now
+        stored_error = error[:4000]
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?,
-                    worker_id = NULL,
-                    attempts = ?,
-                    error = ?,
-                    updated_at = ?,
-                    available_at = ?
-                WHERE id = ?
-                """,
-                (status.value, next_attempts, error[:4000], now, available_at, job_id),
-            )
-        self.add_event(job_id, JobEventType.FAILED if not retry else JobEventType.RETRY_SCHEDULED, message=error)
-        updated = self.get(job_id)
-        if updated is None:
-            raise KeyError(job_id)
-        return updated
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if row is None:
+                    conn.execute("ROLLBACK")
+                    raise KeyError(job_id)
+                record = self._row_to_record(row)
+                next_attempts = record.attempts + 1
+                retry = next_attempts < record.max_attempts
+                status = JobStatus.QUEUED if retry else JobStatus.FAILED
+                event_type = JobEventType.RETRY_SCHEDULED if retry else JobEventType.FAILED
+                available_at = now + retry_delay_seconds if retry else now
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        worker_id = NULL,
+                        attempts = ?,
+                        error = ?,
+                        updated_at = ?,
+                        available_at = ?
+                    WHERE id = ?
+                    """,
+                    (status.value, next_attempts, stored_error, now, available_at, job_id),
+                )
+                _add_event_conn(conn, job_id, event_type, message=error, created_at=now)
+                conn.execute("COMMIT")
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        return replace(
+            record,
+            status=status,
+            attempts=next_attempts,
+            worker_id=None,
+            error=stored_error,
+            updated_at=now,
+            available_at=available_at,
+        )
 
     def retry(self, job_id: str) -> JobRecord:
         now = time.time()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE jobs
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if row is None:
+                    conn.execute("ROLLBACK")
+                    raise KeyError(job_id)
+                record = self._row_to_record(row)
+                conn.execute(
+                    """
+                    UPDATE jobs
                     SET status = ?,
-                    worker_id = NULL,
-                    error = NULL,
-                    updated_at = ?,
-                    available_at = ?
-                WHERE id = ?
-                """,
-                (JobStatus.QUEUED.value, now, now, job_id),
-            )
-        self.add_event(job_id, JobEventType.MANUAL_RETRY)
-        record = self.get(job_id)
-        if record is None:
-            raise KeyError(job_id)
-        return record
+                        worker_id = NULL,
+                        error = NULL,
+                        updated_at = ?,
+                        available_at = ?
+                    WHERE id = ?
+                    """,
+                    (JobStatus.QUEUED.value, now, now, job_id),
+                )
+                _add_event_conn(conn, job_id, JobEventType.MANUAL_RETRY, created_at=now)
+                conn.execute("COMMIT")
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        return replace(
+            record,
+            status=JobStatus.QUEUED,
+            worker_id=None,
+            error=None,
+            updated_at=now,
+            available_at=now,
+        )
 
     def reconcile_failed_fanout_parent(self, root_job_id: str) -> JobRecord | None:
         record = self.get(root_job_id)
