@@ -43,6 +43,8 @@ class Settings:
     process_batch_size: int = _int_env("PROCESS_BATCH_SIZE", _int_env("POSTPROCESS_BATCH_SIZE", 1))
     analyze_batch_size: int = _int_env("ANALYZE_BATCH_SIZE", _int_env("GPU_BATCH_SIZE", 1))
     worker_poll_seconds: float = float(os.getenv("WORKER_POLL_SECONDS", "0.25"))
+    default_retry_delay_seconds: int = _int_env("DEFAULT_RETRY_DELAY_SECONDS", 30)
+    download_retry_delay_seconds: int = _int_env("DOWNLOAD_RETRY_DELAY_SECONDS", 5)
     job_lease_timeout_seconds: int = _int_env("JOB_LEASE_TIMEOUT_SECONDS", 1800)
     work_dir_cleanup_enabled: bool = _bool_env("WORK_DIR_CLEANUP_ENABLED", True)
     work_dir_cleanup_interval_seconds: float = _float_env("WORK_DIR_CLEANUP_INTERVAL_SECONDS", 300.0)

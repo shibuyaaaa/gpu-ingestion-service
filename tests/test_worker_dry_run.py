@@ -1,6 +1,8 @@
 import asyncio
 import tempfile
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.config import Settings
 from app.jobs import build_default_registry
@@ -12,7 +14,7 @@ from app.legacy.db import DBClient
 from app.legacy.utils.source import _yt_dlp_js_args
 from app.legacy.utils import GCSClient
 from app.models import ModelRuntimeBundle
-from app.queue import JobStatus, JobStore, JobType
+from app.queue import JobStage, JobStatus, JobStore, JobType
 from app.workers import WorkerManager
 
 
@@ -48,6 +50,25 @@ def test_yt_dlp_js_runtime_enables_ejs_remote_component(monkeypatch):
         "--remote-components",
         "ejs:github",
     ]
+
+
+def test_worker_uses_short_retry_delay_for_download_failures():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        settings = Settings(
+            queue_db_path=root / "queue.sqlite3",
+            work_dir=root / "work",
+            default_retry_delay_seconds=31,
+            download_retry_delay_seconds=4,
+            start_workers=False,
+        )
+        store = JobStore(settings.queue_db_path, max_depth=10)
+        job, _ = store.enqueue({"job_id": "retry-policy", "job_type": "quick_dissect", "source": "song"})
+        manager = WorkerManager(context=SimpleNamespace(settings=settings), registry=None)
+
+        assert manager._retry_delay_seconds(job) == 4
+        assert manager._retry_delay_seconds(replace(job, stage=JobStage.ANALYZE)) == 31
+        assert manager.state()["scheduling"]["retry_delay_seconds"] == {"download": 4, "default": 31}
 
 
 async def test_worker_completes_local_dry_run_job():

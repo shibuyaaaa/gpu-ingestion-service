@@ -159,11 +159,20 @@ class WorkerManager:
             state.last_error = None
         except Exception as exc:
             logger.exception("job %s stage %s failed", job.id, job.stage)
-            self.context.store.fail_stage(job.id, str(exc))
+            self.context.store.fail_stage(
+                job.id,
+                str(exc),
+                retry_delay_seconds=self._retry_delay_seconds(job),
+            )
             state.failures += 1
             state.last_error = str(exc)
         finally:
             state.active_job_ids = [job_id for job_id in state.active_job_ids if job_id != job.id]
+
+    def _retry_delay_seconds(self, job: JobRecord) -> int:
+        if job.stage == JobStage.DOWNLOAD:
+            return max(0, self.context.settings.download_retry_delay_seconds)
+        return max(0, self.context.settings.default_retry_delay_seconds)
 
     async def _cleanup_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -264,6 +273,10 @@ class WorkerManager:
                 "gpu_stages": [JobStage.PROCESS.value, JobStage.ANALYZE.value],
                 "process_cpu_workers": self.context.settings.process_workers,
                 "process_cpu_batch_size": self.context.settings.process_batch_size,
+                "retry_delay_seconds": {
+                    "download": self.context.settings.download_retry_delay_seconds,
+                    "default": self.context.settings.default_retry_delay_seconds,
+                },
                 "claim_order": ["priority_desc", "created_at_asc"],
                 "stages": [stage.value for stage in JobStage],
             },
