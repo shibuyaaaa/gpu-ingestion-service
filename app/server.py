@@ -195,6 +195,25 @@ async def get_job_children_summary(job_id: str) -> dict[str, Any]:
     return store.child_summary(job_id)
 
 
+@app.post("/ops/jobs/status-batch")
+async def get_jobs_status_batch(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_job_ids = payload.get("job_ids")
+    if not isinstance(raw_job_ids, list):
+        raise HTTPException(status_code=400, detail="job_ids must be a list")
+    job_ids = [str(job_id) for job_id in raw_job_ids if str(job_id)]
+    if len(job_ids) > 200:
+        raise HTTPException(status_code=400, detail="job_ids cannot exceed 200")
+
+    jobs_by_id = store.get_many(job_ids)
+    child_summaries = store.child_summaries(jobs_by_id.keys())
+    return {
+        "jobs": {
+            job_id: _batch_job_status(job_id, jobs_by_id.get(job_id), child_summaries)
+            for job_id in job_ids
+        }
+    }
+
+
 @app.get("/ops/crawler/session/{session_id}")
 async def get_crawler_session(session_id: str) -> dict[str, Any]:
     crawler_store = _crawler_store_if_available()
@@ -264,6 +283,28 @@ def _crawler_status() -> dict[str, Any]:
         return {**status, "available": True, **crawler_store.status()}
     except Exception as exc:
         return {**status, "error": str(exc)[:1000]}
+
+
+def _batch_job_status(
+    job_id: str,
+    job,
+    child_summaries: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    if job is None:
+        return {
+            "found": False,
+            "job_id": job_id,
+            "root_status": None,
+            "child_summary": {},
+            "error": None,
+        }
+    return {
+        "found": True,
+        "job_id": job.id,
+        "root_status": job.status.value,
+        "child_summary": child_summaries.get(job.id, {"total": 0, "active": 0, "completed": 0, "failed": 0}),
+        "error": job.error,
+    }
 
 
 def _crawler_store_if_available() -> CrawlerStore | None:

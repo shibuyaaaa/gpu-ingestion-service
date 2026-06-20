@@ -49,11 +49,23 @@ class FakeOps:
     def __init__(self, *, unavailable: bool = False):
         self.states: dict[str, JobTerminalState] = {}
         self.unavailable = unavailable
+        self.job_state_calls: list[str] = []
+        self.job_states_calls: list[list[str]] = []
 
     async def job_state(self, job_id: str) -> JobTerminalState:
+        self.job_state_calls.append(job_id)
         if self.unavailable:
             raise IngestionOpsUnavailable("local API unavailable")
         return self.states.get(job_id, JobTerminalState(status="running", root_status="queued", child_summary={}))
+
+    async def job_states(self, job_ids: list[str]) -> dict[str, JobTerminalState]:
+        self.job_states_calls.append(list(job_ids))
+        if self.unavailable:
+            raise IngestionOpsUnavailable("local API unavailable")
+        return {
+            job_id: self.states.get(job_id, JobTerminalState(status="running", root_status="queued", child_summary={}))
+            for job_id in job_ids
+        }
 
 
 def test_spotify_candidates_dedupe_and_sort_by_popularity_then_rank():
@@ -248,6 +260,42 @@ async def test_waiting_session_retries_when_ops_api_is_temporarily_unavailable()
         assert result["ops_unavailable"] is True
         assert store.get_active_session()["status"] == "waiting"
         assert store.submissions_for_session(store.get_active_session()["id"])[0]["status"] == "submitted"
+
+
+async def test_waiting_session_refreshes_submissions_with_one_batch_ops_call():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(tmp, batch_size=3)
+        store = CrawlerStore(Path(tmp) / "crawler.sqlite3")
+        provider = FakeProvider([
+            _candidate("a", popularity=99, rank=0),
+            _candidate("b", popularity=98, rank=1),
+            _candidate("c", popularity=97, rank=2),
+        ])
+        ops = FakeOps()
+        publisher = FakePublisher()
+        runner = CrawlerRunner(
+            settings=settings,
+            store=store,
+            provider=provider,
+            publisher=publisher,
+            ops=ops,
+            library=FakeLibrary(),
+        )
+
+        await runner.run_once()
+        session_id = store.get_active_session()["id"]
+        for payload in publisher.payloads:
+            ops.states[payload["job_id"]] = JobTerminalState(
+                status="completed",
+                root_status="completed",
+                child_summary={"total": 1, "active": 0, "completed": 1, "failed": 0},
+            )
+
+        await runner.run_once()
+
+        assert ops.job_states_calls == [[payload["job_id"] for payload in publisher.payloads]]
+        assert ops.job_state_calls == []
+        assert store.session_detail(session_id)["status"] == "completed"
 
 
 async def test_local_publish_failure_is_retryable_without_duplicating_successes():

@@ -167,18 +167,21 @@ class CrawlerRunner:
     async def _refresh_waiting_session(self, session: dict[str, Any]) -> dict[str, Any]:
         session_id = session["id"]
         submissions = self.store.submissions_for_session(session_id)
-        for submission in submissions:
-            if submission["status"] == "completed":
-                continue
-            try:
+        pending_submissions = [submission for submission in submissions if submission["status"] != "completed"]
+        try:
+            states = await self._job_states([submission["job_id"] for submission in pending_submissions])
+        except IngestionOpsUnavailable as exc:
+            logger.warning("ingestion ops unavailable; retrying crawler session later: %s", exc)
+            self.store.mark_session_waiting(
+                session_id,
+                next_poll_at=self._now() + self.settings.crawler_poll_seconds,
+            )
+            return {"session_id": session_id, "completed": False, "status": "waiting", "ops_unavailable": True}
+
+        for submission in pending_submissions:
+            state = states.get(submission["job_id"])
+            if state is None:
                 state = await self.ops.job_state(submission["job_id"])
-            except IngestionOpsUnavailable as exc:
-                logger.warning("ingestion ops unavailable; retrying crawler session later: %s", exc)
-                self.store.mark_session_waiting(
-                    session_id,
-                    next_poll_at=self._now() + self.settings.crawler_poll_seconds,
-                )
-                return {"session_id": session_id, "completed": False, "status": "waiting", "ops_unavailable": True}
             self.store.update_submission_status(
                 job_id=submission["job_id"],
                 status=state.status,
@@ -195,6 +198,14 @@ class CrawlerRunner:
             next_poll_at=self._now() + self.settings.crawler_poll_seconds,
         )
         return {"session_id": session_id, "completed": False, "status": "waiting"}
+
+    async def _job_states(self, job_ids: list[str]) -> dict[str, Any]:
+        if not job_ids:
+            return {}
+        batch_fn = getattr(self.ops, "job_states", None)
+        if batch_fn is not None:
+            return await batch_fn(job_ids)
+        return {job_id: await self.ops.job_state(job_id) for job_id in job_ids}
 
 
 def _payload_for_candidate(session_id: str, candidate: ChartCandidate) -> dict[str, Any]:

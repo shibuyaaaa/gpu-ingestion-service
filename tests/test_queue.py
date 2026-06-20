@@ -487,6 +487,48 @@ def test_child_summary_counts_only_matching_root_jobs_and_can_exclude_current_ch
         }
 
 
+def test_child_summaries_counts_multiple_roots_in_one_call():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=20)
+        root_a, _ = store.enqueue({"job_id": "root-a", "job_type": "bulk_dissect", "source": "song-a"})
+        root_b, _ = store.enqueue({"job_id": "root-b", "job_type": "bulk_dissect", "source": "song-b"})
+        child_a = store.enqueue_process_child(
+            parent_job=root_a,
+            child_id="root-a:bulk:seg-0:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song-a", "root_job_id": "root-a"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        store.enqueue_process_child(
+            parent_job=root_a,
+            child_id="root-a:bulk:seg-1:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song-a", "root_job_id": "root-a"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-1"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        child_b = store.enqueue_process_child(
+            parent_job=root_b,
+            child_id="root-b:bulk:seg-0:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song-b", "root_job_id": "root-b"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        store.claim_next([JobStage.PROCESS], "process-worker")
+        store.complete_stage(child_a.id, next_stage=None)
+        store.fail_stage(child_b.id, "broken", retry_delay_seconds=0)
+        store.fail_stage(child_b.id, "broken", retry_delay_seconds=0)
+        store.fail_stage(child_b.id, "broken", retry_delay_seconds=0)
+
+        assert store.child_summaries(["root-a", "root-b", "missing-root"]) == {
+            "root-a": {"total": 2, "active": 1, "completed": 1, "failed": 0},
+            "root-b": {"total": 1, "active": 0, "completed": 0, "failed": 1},
+            "missing-root": {"total": 0, "active": 0, "completed": 0, "failed": 0},
+        }
+
+
 def test_reconcile_failed_fanout_parent_waits_for_active_children():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)

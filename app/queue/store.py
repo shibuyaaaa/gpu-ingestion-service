@@ -239,6 +239,19 @@ class JobStore:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return self._row_to_record(row) if row else None
 
+    def get_many(self, job_ids: Iterable[str]) -> dict[str, JobRecord]:
+        normalized = [str(job_id) for job_id in job_ids if str(job_id)]
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" for _ in normalized)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM jobs WHERE id IN ({placeholders})",
+                tuple(normalized),
+            ).fetchall()
+        records = [self._row_to_record(row) for row in rows]
+        return {record.id: record for record in records}
+
     def get_by_source_message(self, source_message_id: str | None) -> JobRecord | None:
         if not source_message_id:
             return None
@@ -679,6 +692,44 @@ class JobStore:
             "completed": completed,
             "failed": failed,
         }
+
+    def child_summaries(self, root_job_ids: Iterable[str]) -> dict[str, dict[str, int]]:
+        normalized = [str(root_job_id) for root_job_id in dict.fromkeys(root_job_ids) if str(root_job_id)]
+        summaries = {
+            root_job_id: {"total": 0, "active": 0, "completed": 0, "failed": 0}
+            for root_job_id in normalized
+        }
+        if not normalized:
+            return summaries
+
+        placeholders = ",".join("?" for _ in normalized)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    json_extract(payload_json, '$.root_job_id') AS root_job_id,
+                    status,
+                    COUNT(*) AS count
+                FROM jobs
+                WHERE json_extract(payload_json, '$.root_job_id') IN ({placeholders})
+                GROUP BY root_job_id, status
+                """,
+                tuple(normalized),
+            ).fetchall()
+
+        for row in rows:
+            root_job_id = str(row["root_job_id"])
+            status = str(row["status"])
+            count = int(row["count"])
+            summary = summaries[root_job_id]
+            summary["total"] += count
+            if status == JobStatus.COMPLETED.value:
+                summary["completed"] += count
+            elif status == JobStatus.FAILED.value:
+                summary["failed"] += count
+            else:
+                summary["active"] += count
+        return summaries
 
     def add_event(
         self,
