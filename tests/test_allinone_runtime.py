@@ -290,6 +290,20 @@ def test_load_can_skip_resident_demucs_preload(monkeypatch):
     assert runtime.status()["demucs"]["preloaded"] is False
 
 
+def test_demucs_overlap_defaults_to_benchmarked_fast_value(monkeypatch):
+    monkeypatch.delenv("ALL_IN_ONE_DEMUCS_OVERLAP", raising=False)
+
+    assert allinone_module._demucs_overlap() == 0.05
+
+
+def test_demucs_overlap_is_clamped(monkeypatch):
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_OVERLAP", "-1")
+    assert allinone_module._demucs_overlap() == 0.0
+
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_OVERLAP", "3")
+    assert allinone_module._demucs_overlap() == 0.99
+
+
 def test_save_demucs_sources_saves_all_sources(tmp_path):
     calls = []
 

@@ -245,6 +245,7 @@ class AllInOneRuntime:
                 "preload_enabled": _bool_env("ALL_IN_ONE_DEMUCS_PRELOAD", True),
                 "preloaded": self._demucs_preloaded,
                 "segment": _demucs_segment_status(),
+                "overlap": _demucs_overlap(),
                 "jobs": os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0"),
                 "save_workers": _demucs_save_workers(),
                 "resident_cache_keys": list(_DEMUCS_MODEL_CACHE.keys()),
@@ -313,6 +314,8 @@ def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs
     timings["demix_segment_configured_seconds"] = segment_status["configured_seconds"]
     timings["demix_segment_max_seconds"] = segment_status["max_seconds"]
     timings["demix_segment_clamped"] = segment_status["clamped"]
+    overlap = _demucs_overlap()
+    timings["demix_overlap"] = overlap
     jobs = _int_env("ALL_IN_ONE_DEMUCS_JOBS", 0)
     for path in paths:
         path = Path(path)
@@ -344,7 +347,7 @@ def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs
                 device_batch,
                 device=torch_device,
                 split=True,
-                overlap=_float_env("ALL_IN_ONE_DEMUCS_OVERLAP", 0.25),
+                overlap=overlap,
                 segment=segment,
                 num_workers=jobs,
                 progress=False,
@@ -450,6 +453,10 @@ def _demucs_backend() -> str:
 
 def _demucs_save_workers() -> int:
     return max(1, _int_env("ALL_IN_ONE_DEMUCS_SAVE_WORKERS", 2))
+
+
+def _demucs_overlap() -> float:
+    return min(0.99, max(0.0, _float_env("ALL_IN_ONE_DEMUCS_OVERLAP", 0.05)))
 
 
 def _demucs_segment_status() -> dict[str, Any]:
