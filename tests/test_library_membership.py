@@ -590,6 +590,10 @@ async def test_analyze_reuses_cached_all_in_one_outputs_for_same_youtube_source(
         assert second.artifacts["analysis_timings"]["analysis_cache_hit"] == 1
         assert second.artifacts["analysis_timings"]["allin1_analyze_seconds"] == 0.0
         assert second.artifacts["analysis_timings"]["demix_total_seconds"] == 0.0
+        assert second.artifacts["analysis_timings"]["fanout_enqueue_seconds"] >= 0.0
+        assert second.artifacts["analysis_timings"]["fanout_child_count"] == 2
+        assert second.artifacts["analysis_timings"]["fanout_chord_child_count"] == 1
+        assert second.artifacts["analysis_timings"]["fanout_other_child_count"] == 1
         assert Path(second.artifacts["full_stem_paths"]["other"]).exists()
         assert second.artifacts["fanout"]["strategy"] == "segment_chord_and_other_jobs_priority_fanout"
         assert second.artifacts["fanout"]["child_count"] == 2

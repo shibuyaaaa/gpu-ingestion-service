@@ -340,7 +340,23 @@ class DissectAdapter(JobAdapter):
             "chorus_segment": chorus_segment,
             "skip_segment_ids": job.artifacts.get("skip_segment_ids", []),
         }
+        fanout_started = time.perf_counter()
         fanout = self._enqueue_analyzed_process_jobs(job, context, artifacts)
+        fanout_children = fanout.get("children") if isinstance(fanout, dict) else []
+        if not isinstance(fanout_children, list):
+            fanout_children = []
+        analysis_timings.update(
+            {
+                "fanout_enqueue_seconds": round(time.perf_counter() - fanout_started, 6),
+                "fanout_child_count": int(fanout.get("child_count") or len(fanout_children)),
+                "fanout_chord_child_count": sum(
+                    1 for child in fanout_children if child.get("process_mode") == PROCESS_MODE_SEGMENT_CHORD
+                ),
+                "fanout_other_child_count": sum(
+                    1 for child in fanout_children if child.get("process_mode") == PROCESS_MODE_SEGMENT_OTHER
+                ),
+            }
+        )
         return StageResult(
             next_stage=None,
             artifacts={

@@ -236,6 +236,10 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
                     "demix_segment_seconds": 7.5,
                     "demix_segment_configured_seconds": 15.0,
                     "demix_segment_max_seconds": 7.5,
+                    "fanout_enqueue_seconds": 0.03,
+                    "fanout_child_count": 30,
+                    "fanout_chord_child_count": 15,
+                    "fanout_other_child_count": 15,
                     "gpu_sample_count": 4,
                     "gpu_utilization_avg_pct": 61.5,
                     "gpu_memory_used_max_mb": 12000,
@@ -284,6 +288,10 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["analyze"]["avg_seconds"]["demix_segment_seconds"] == 7.5
         assert summary["analyze"]["avg_seconds"]["demix_segment_configured_seconds"] == 15.0
         assert summary["analyze"]["avg_seconds"]["demix_segment_max_seconds"] == 7.5
+        assert summary["analyze"]["avg_seconds"]["fanout_enqueue_seconds"] == 0.03
+        assert summary["analyze"]["avg_seconds"]["fanout_child_count"] == 30.0
+        assert summary["analyze"]["avg_seconds"]["fanout_chord_child_count"] == 15.0
+        assert summary["analyze"]["avg_seconds"]["fanout_other_child_count"] == 15.0
         assert summary["analyze"]["avg_seconds"]["gpu_utilization_avg_pct"] == 61.5
         assert summary["analyze"]["avg_seconds"]["gpu_memory_used_max_mb"] == 12000.0
         assert summary["analyze"]["avg_seconds"]["processing_seconds"] is not None
@@ -306,6 +314,7 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["latest"][0]["duration_seconds"] >= summary["latest"][0]["processing_seconds"]
         assert summary["latest"][1]["queue_wait_seconds"] is not None
         assert summary["latest"][1]["processing_seconds"] is not None
+        assert summary["latest"][1]["timings"]["fanout_child_count"] == 30
         assert summary["latest"][2]["timings"]["youtube_download_seconds"] == 2.0
 
 
