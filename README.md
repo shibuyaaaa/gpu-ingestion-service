@@ -67,7 +67,7 @@ run with `DRY_RUN_MODE=false`.
 - `MAX_TOTAL_QUEUE_DEPTH`: backpressure limit. Default: `1000` for crawler fanout.
 - `DOWNLOAD_WORKERS`, `DOWNLOAD_BATCH_SIZE`: local source/download workers.
 - `ANALYZE_BATCH_SIZE`: analyze-stage jobs per GPU loop. Default: `1` for one L4.
-- `PROCESS_WORKERS`, `PROCESS_BATCH_SIZE`: process-stage segment workers. Default: `4` workers with `FFMPEG_THREADS=1` to hide GCS/DB/ffmpeg wait on the 3-core ingestion cpuset without increasing GPU concurrency.
+- `PROCESS_WORKERS`, `PROCESS_BATCH_SIZE`: process-stage segment workers. Default: `4` workers with `FFMPEG_THREADS=1` to hide GCS/DB/ffmpeg wait on the 3-core ingestion cpuset without increasing GPU concurrency. A measured `PROCESS_WORKERS=6` run reduced queue wait slightly but slowed per-job processing enough to be flat/worse overall.
 - `WORKER_POLL_SECONDS`: idle queue polling interval. Default: `0.10` to keep fanout and quick-job handoff latency low.
 - `FFMPEG_THREADS`: per-ffmpeg subprocess thread cap for CPU segment slicing/transcoding. Default: `1` to avoid oversubscribing a 4-vCPU L4 VM with multiple process workers.
 - `JOB_LEASE_TIMEOUT_SECONDS`: startup recovery timeout for crashed workers.
