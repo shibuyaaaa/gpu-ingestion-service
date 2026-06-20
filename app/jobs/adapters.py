@@ -207,7 +207,11 @@ class DissectAdapter(JobAdapter):
                 shutil.copyfile(cache_path, wav_path)
                 timings["source_audio_cache_store_seconds"] = round(time.perf_counter() - started, 6)
                 timings["wav_copy_seconds"] = 0.0
-                await _prune_source_audio_cache(cache_dir, context.settings.source_audio_cache_max_entries)
+                await _prune_source_audio_cache(
+                    cache_dir,
+                    max_entries=context.settings.source_audio_cache_max_entries,
+                    max_bytes=context.settings.source_audio_cache_max_bytes,
+                )
                 return True
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -283,7 +287,11 @@ class DissectAdapter(JobAdapter):
             timings["analysis_cache_store_wait_seconds"] = wait_seconds
             timings["analysis_cache_store_seconds"] = round(time.perf_counter() - started, 6)
             timings["analysis_cache_hit"] = 0
-            await _prune_analysis_cache(cache_root, context.settings.analysis_cache_max_entries)
+            await _prune_analysis_cache(
+                cache_root,
+                max_entries=context.settings.analysis_cache_max_entries,
+                max_bytes=context.settings.analysis_cache_max_bytes,
+            )
 
     async def analyze(self, job: JobRecord, context: JobContext) -> StageResult:
         audio_path = job.artifacts["audio_path"]
@@ -1220,8 +1228,8 @@ def _link_or_copy(source: Path, target: Path) -> None:
         shutil.copy2(source, target)
 
 
-async def _prune_analysis_cache(cache_root: Path, max_entries: int) -> None:
-    if max_entries <= 0:
+async def _prune_analysis_cache(cache_root: Path, *, max_entries: int, max_bytes: int) -> None:
+    if max_entries <= 0 and max_bytes <= 0:
         return
 
     def prune() -> None:
@@ -1232,11 +1240,22 @@ async def _prune_analysis_cache(cache_root: Path, max_entries: int) -> None:
                 continue
             metadata = path / "metadata.json"
             try:
-                entries.append((metadata.stat().st_mtime, path))
+                entries.append((metadata.stat().st_mtime, _directory_size(path), path))
             except OSError:
-                entries.append((0.0, path))
+                entries.append((0.0, _directory_size(path), path))
         entries.sort(reverse=True, key=lambda item: item[0])
-        for _, stale in entries[max_entries:]:
+        total_bytes = sum(size for _, size, _ in entries)
+        keep: list[tuple[float, int, Path]] = []
+        for item in entries:
+            if max_entries > 0 and len(keep) >= max_entries:
+                total_bytes -= item[1]
+                shutil.rmtree(item[2], ignore_errors=True)
+                continue
+            keep.append(item)
+        for _, size, stale in reversed(keep):
+            if max_bytes <= 0 or total_bytes <= max_bytes:
+                break
+            total_bytes -= size
             shutil.rmtree(stale, ignore_errors=True)
 
     await asyncio.to_thread(prune)
@@ -1275,8 +1294,8 @@ def cache_lock_status() -> dict[str, Any]:
     }
 
 
-async def _prune_source_audio_cache(cache_dir: Path, max_entries: int) -> None:
-    if max_entries <= 0:
+async def _prune_source_audio_cache(cache_dir: Path, *, max_entries: int, max_bytes: int) -> None:
+    if max_entries <= 0 and max_bytes <= 0:
         return
 
     def prune() -> None:
@@ -1285,13 +1304,46 @@ async def _prune_source_audio_cache(cache_dir: Path, max_entries: int) -> None:
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
-        for stale in files[max_entries:]:
-            try:
-                stale.unlink()
-            except OSError:
-                pass
+        sizes = {path: _safe_path_size(path) for path in files}
+        total_bytes = sum(sizes.values())
+        keep: list[Path] = []
+        for path in files:
+            if max_entries > 0 and len(keep) >= max_entries:
+                total_bytes -= sizes[path]
+                _safe_unlink(path)
+                continue
+            keep.append(path)
+        for stale in reversed(keep):
+            if max_bytes <= 0 or total_bytes <= max_bytes:
+                break
+            total_bytes -= sizes[stale]
+            _safe_unlink(stale)
 
     await asyncio.to_thread(prune)
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return total
+    for child in path.rglob("*"):
+        if child.is_file():
+            total += _safe_path_size(child)
+    return total
+
+
+def _safe_path_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 _REQUIRED_DEMUCS_STEMS = ("bass", "drums", "other", "vocals")

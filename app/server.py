@@ -274,8 +274,10 @@ async def _cache_status() -> dict[str, Any]:
         work_dir=settings.work_dir,
         source_audio_enabled=settings.source_audio_cache_enabled,
         source_audio_max_entries=settings.source_audio_cache_max_entries,
+        source_audio_max_bytes=settings.source_audio_cache_max_bytes,
         analysis_enabled=settings.analysis_cache_enabled,
         analysis_max_entries=settings.analysis_cache_max_entries,
+        analysis_max_bytes=settings.analysis_cache_max_bytes,
         lock_status=cache_lock_status(),
     )
 

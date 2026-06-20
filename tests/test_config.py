@@ -1,4 +1,4 @@
-from app.config import Settings
+from app.config import Settings, _bytes_env
 
 
 def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
@@ -13,6 +13,8 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
         "POSTPROCESS_BATCH_SIZE",
         "WORKER_POLL_SECONDS",
         "GPU_JOB_SAMPLE_INTERVAL_SECONDS",
+        "SOURCE_AUDIO_CACHE_MAX_BYTES",
+        "ANALYSIS_CACHE_MAX_BYTES",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -24,3 +26,13 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
     assert settings.process_batch_size == 1
     assert settings.worker_poll_seconds == 0.10
     assert settings.gpu_job_sample_interval_seconds == 0.5
+    assert settings.source_audio_cache_max_bytes == 8 * 1024**3
+    assert settings.analysis_cache_max_bytes == 2 * 1024**3
+
+
+def test_cache_byte_env_accepts_human_readable_units(monkeypatch):
+    monkeypatch.setenv("SOURCE_AUDIO_CACHE_MAX_BYTES", "1.5gb")
+    monkeypatch.setenv("ANALYSIS_CACHE_MAX_BYTES", "512mb")
+
+    assert _bytes_env("SOURCE_AUDIO_CACHE_MAX_BYTES", 0) == int(1.5 * 1024**3)
+    assert _bytes_env("ANALYSIS_CACHE_MAX_BYTES", 0) == 512 * 1024**2
