@@ -136,53 +136,68 @@ class JobStore:
         artifacts_json = _json_dumps(initial_artifacts or {})
         now = time.time()
         with self._lock, self._connect() as conn:
-            current_depth = conn.execute(
-                f"SELECT COUNT(*) FROM jobs WHERE {ACTIVE_JOBS_WHERE_SQL}",
-            ).fetchone()[0]
-            existing_by_source = self.get_by_source_message(source_message_id)
-            if existing_by_source:
-                return existing_by_source, False
-            existing = self.get(job_id)
-            if existing:
-                return existing, False
-            if current_depth >= self.max_depth:
-                raise QueueFull(f"queue depth {current_depth} >= max {self.max_depth}")
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                INSERT INTO jobs (
-                    id, source_message_id, job_type, stage, status, payload_json,
-                    artifacts_json, attempts, max_attempts, priority, created_at,
-                    updated_at, available_at
+            try:
+                if source_message_id:
+                    existing_by_source = conn.execute(
+                        "SELECT * FROM jobs WHERE source_message_id = ?",
+                        (source_message_id,),
+                    ).fetchone()
+                    if existing_by_source:
+                        conn.execute("COMMIT")
+                        return self._row_to_record(existing_by_source), False
+
+                existing = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if existing:
+                    conn.execute("COMMIT")
+                    return self._row_to_record(existing), False
+
+                current_depth = conn.execute(
+                    f"SELECT COUNT(*) FROM jobs WHERE {ACTIVE_JOBS_WHERE_SQL}",
+                ).fetchone()[0]
+                if current_depth >= self.max_depth:
+                    raise QueueFull(f"queue depth {current_depth} >= max {self.max_depth}")
+
+                conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, source_message_id, job_type, stage, status, payload_json,
+                        artifacts_json, attempts, max_attempts, priority, created_at,
+                        updated_at, available_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        source_message_id,
+                        job_type.value,
+                        initial_stage.value,
+                        JobStatus.QUEUED.value,
+                        _json_dumps(payload),
+                        artifacts_json,
+                        max_attempts,
+                        job_priority,
+                        now,
+                        now,
+                        now,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
-                """,
-                (
+                _add_event_conn(
+                    conn,
                     job_id,
-                    source_message_id,
-                    job_type.value,
-                    initial_stage.value,
-                    JobStatus.QUEUED.value,
-                    _json_dumps(payload),
-                    artifacts_json,
-                    max_attempts,
-                    job_priority,
-                    now,
-                    now,
-                    now,
-                ),
-            )
-            conn.execute("COMMIT")
-        record = self.get_by_source_message(source_message_id) if source_message_id else self.get(job_id)
-        if record is None:
+                    JobEventType.ENQUEUED,
+                    created_at=now,
+                    data={"job_type": job_type.value, "created": True, "priority": job_priority},
+                )
+                row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                conn.execute("COMMIT")
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        if row is None:
             raise RuntimeError("job enqueue failed")
-        created = record.id == job_id
-        self.add_event(
-            record.id,
-            JobEventType.ENQUEUED,
-            data={"job_type": job_type.value, "created": created, "priority": record.priority},
-        )
-        return record, created
+        return self._row_to_record(row), True
 
     def enqueue_continuation(
         self,

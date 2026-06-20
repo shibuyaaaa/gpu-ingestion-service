@@ -40,6 +40,26 @@ def test_enqueue_is_idempotent_by_job_id():
         assert store.stats()["active_depth"] == 1
 
 
+def test_enqueue_is_idempotent_by_source_message_id():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        first, created_first = store.enqueue(
+            {"job_id": "a", "job_type": "bulk_dissect", "source": "song"},
+            source_message_id="message-1",
+        )
+        second, created_second = store.enqueue(
+            {"job_id": "b", "job_type": "quick_dissect", "source": "other"},
+            source_message_id="message-1",
+        )
+
+        assert created_first is True
+        assert created_second is False
+        assert first.id == second.id == "a"
+        assert second.job_type == JobType.BULK_DISSECT
+        assert store.get("b") is None
+        assert store.stats()["active_depth"] == 1
+
+
 def test_queue_depth_rejects_new_jobs():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=1)
