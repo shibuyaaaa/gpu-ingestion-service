@@ -239,13 +239,9 @@ class DissectAdapter(JobAdapter):
             "youtube_url": job.artifacts.get("youtube_url"),
             "spotify_metadata": job.artifacts.get("spotify_metadata"),
             "youtube_match": job.artifacts.get("youtube_match"),
-            "analysis": artifacts.get("analysis", {}),
             "analyzer_result_path": artifacts.get("analyzer_result_path"),
             "analyzer_result_url": artifacts.get("analyzer_result_url"),
-            "full_stem_urls": artifacts.get("full_stem_urls", {}),
             "full_stem_paths": artifacts.get("full_stem_paths", {}),
-            "segments": artifacts.get("segments", []),
-            "chorus_segment": artifacts.get("chorus_segment"),
             "skip_segment_ids": artifacts.get("skip_segment_ids", []),
             "skip_library_precheck": job.artifacts.get("skip_library_precheck")
             or job.payload.get("skip_library_precheck"),
