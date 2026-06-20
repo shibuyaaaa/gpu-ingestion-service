@@ -42,7 +42,7 @@ class Settings:
     download_batch_size: int = _int_env("DOWNLOAD_BATCH_SIZE", _int_env("PREP_BATCH_SIZE", 1))
     process_batch_size: int = _int_env("PROCESS_BATCH_SIZE", _int_env("POSTPROCESS_BATCH_SIZE", 1))
     analyze_batch_size: int = _int_env("ANALYZE_BATCH_SIZE", _int_env("GPU_BATCH_SIZE", 1))
-    worker_poll_seconds: float = float(os.getenv("WORKER_POLL_SECONDS", "0.25"))
+    worker_poll_seconds: float = float(os.getenv("WORKER_POLL_SECONDS", "0.10"))
     default_retry_delay_seconds: int = _int_env("DEFAULT_RETRY_DELAY_SECONDS", 30)
     download_retry_delay_seconds: int = _int_env("DOWNLOAD_RETRY_DELAY_SECONDS", 5)
     job_lease_timeout_seconds: int = _int_env("JOB_LEASE_TIMEOUT_SECONDS", 1800)

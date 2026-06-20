@@ -273,6 +273,7 @@ class WorkerManager:
                 "gpu_stages": [JobStage.PROCESS.value, JobStage.ANALYZE.value],
                 "process_cpu_workers": self.context.settings.process_workers,
                 "process_cpu_batch_size": self.context.settings.process_batch_size,
+                "worker_poll_seconds": self.context.settings.worker_poll_seconds,
                 "retry_delay_seconds": {
                     "download": self.context.settings.download_retry_delay_seconds,
                     "default": self.context.settings.default_retry_delay_seconds,
