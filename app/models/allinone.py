@@ -229,7 +229,7 @@ class AllInOneRuntime:
             "demucs": {
                 "model": _demucs_model_name(),
                 "backend": _demucs_backend(),
-                "segment_seconds": os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5"),
+                "segment_seconds": _demucs_segment_seconds_text(),
                 "jobs": os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0"),
                 "save_workers": _demucs_save_workers(),
                 "resident_cache_keys": list(_DEMUCS_MODEL_CACHE.keys()),
@@ -254,7 +254,7 @@ def _run_demucs_cli(paths: list[Path], demix_dir: Path, device: Any, demucs_mode
     ]
     if (static_models_dir / f"{demucs_model}.yaml").is_file():
         cmd.extend(["--repo", static_models_dir.as_posix()])
-    segment_seconds = os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "5").strip()
+    segment_seconds = _demucs_segment_seconds_text()
     if segment_seconds:
         cmd.extend(["--segment", segment_seconds])
     jobs = os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0").strip()
@@ -287,7 +287,7 @@ def _run_demucs_resident(paths: list[Path], demix_dir: Path, device: Any, demucs
     model = _resident_demucs_model(demucs_model, device, static_models_dir)
     timings["demix_model_ready_seconds"] = _elapsed(started)
     torch_device = torch.device(device)
-    segment = _optional_float_env("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS")
+    segment = _demucs_segment_seconds()
     jobs = _int_env("ALL_IN_ONE_DEMUCS_JOBS", 0)
     for path in paths:
         path = Path(path)
@@ -419,6 +419,17 @@ def _demucs_backend() -> str:
 
 def _demucs_save_workers() -> int:
     return max(1, _int_env("ALL_IN_ONE_DEMUCS_SAVE_WORKERS", 2))
+
+
+def _demucs_segment_seconds_text() -> str:
+    return os.getenv("ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS", "7.5").strip()
+
+
+def _demucs_segment_seconds() -> float | None:
+    value = _demucs_segment_seconds_text()
+    if value == "":
+        return None
+    return float(value)
 
 
 def _transfer_to_device(batch: Any, device: Any) -> Any:
