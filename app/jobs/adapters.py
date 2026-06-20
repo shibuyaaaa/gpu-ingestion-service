@@ -578,21 +578,38 @@ class DissectAdapter(JobAdapter):
                     early_library_publish = chord_publish.to_dict()
                     _ensure_library_publish_ok(early_library_publish)
                     chord_published = True
-            other_uploads = await asyncio.gather(
-                *(
-                    self._prepare_and_upload_stem(
-                        stem=stem,
-                        path=path,
-                        job_id=job.id,
-                        segment_id=segment_id,
-                        context=context,
-                        upload_cache_key=upload_cache_key,
-                        timings=timings,
-                    )
-                    for stem, path in other_items
+            pending_other_items = []
+            for stem, path in other_items:
+                cached_url = _try_cached_gcs_upload_url_for_stem(
+                    stem=stem,
+                    job_id=job.id,
+                    segment_id=segment_id,
+                    upload_cache_key=upload_cache_key,
+                    context=context,
+                    timings=timings,
                 )
-            )
-            uploaded.update((stem, url) for (stem, _), url in zip(other_items, other_uploads, strict=True))
+                if cached_url is None:
+                    pending_other_items.append((stem, path))
+                else:
+                    uploaded[stem] = cached_url
+            if pending_other_items:
+                other_uploads = await asyncio.gather(
+                    *(
+                        self._prepare_and_upload_stem(
+                            stem=stem,
+                            path=path,
+                            job_id=job.id,
+                            segment_id=segment_id,
+                            context=context,
+                            upload_cache_key=upload_cache_key,
+                            timings=timings,
+                        )
+                        for stem, path in pending_other_items
+                    )
+                )
+                uploaded.update(
+                    (stem, url) for (stem, _), url in zip(pending_other_items, other_uploads, strict=True)
+                )
             timings["upload_and_publish_seconds"] = round(time.perf_counter() - upload_started, 6)
             manifest_url = None
             if context.settings.segment_manifest_upload_enabled:
@@ -643,12 +660,12 @@ class DissectAdapter(JobAdapter):
             and exists_fn is not None
         )
         if cache_lookup_enabled:
-            cached_url = _get_cached_gcs_upload_url(
-                gcs_path,
-                max_entries=context.settings.gcs_segment_upload_url_cache_max_entries,
+            cached_url = _try_cached_gcs_upload_url(
+                gcs_path=gcs_path,
+                context=context,
+                timings=timings,
             )
             if cached_url is not None:
-                _add_timing_counter(timings, "gcs_segment_upload_memory_cache_hit_count")
                 return cached_url
             _add_timing_counter(timings, "gcs_segment_upload_cache_lookup_count")
             started = time.perf_counter()
@@ -1511,6 +1528,44 @@ def _add_timing_counter(timings: dict[str, float] | None, key: str, value: float
     if timings is None:
         return
     timings[key] = round(float(timings.get(key, 0.0)) + float(value), 6)
+
+
+def _try_cached_gcs_upload_url_for_stem(
+    *,
+    stem: str,
+    job_id: str,
+    segment_id: str,
+    upload_cache_key: str | None,
+    context: JobContext,
+    timings: dict[str, float] | None,
+) -> str | None:
+    if not upload_cache_key or not context.settings.gcs_segment_upload_cache_enabled:
+        return None
+    return _try_cached_gcs_upload_url(
+        gcs_path=_segment_upload_gcs_path(
+            stem=stem,
+            job_id=job_id,
+            segment_id=segment_id,
+            upload_cache_key=upload_cache_key,
+        ),
+        context=context,
+        timings=timings,
+    )
+
+
+def _try_cached_gcs_upload_url(
+    *,
+    gcs_path: str,
+    context: JobContext,
+    timings: dict[str, float] | None,
+) -> str | None:
+    cached_url = _get_cached_gcs_upload_url(
+        gcs_path,
+        max_entries=context.settings.gcs_segment_upload_url_cache_max_entries,
+    )
+    if cached_url is not None:
+        _add_timing_counter(timings, "gcs_segment_upload_memory_cache_hit_count")
+    return cached_url
 
 
 def _get_cached_gcs_upload_url(gcs_path: str, *, max_entries: int) -> str | None:
