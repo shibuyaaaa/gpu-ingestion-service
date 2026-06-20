@@ -120,7 +120,7 @@ class AudioOps:
 
     @staticmethod
     def _ffmpeg_semaphore() -> asyncio.Semaphore | None:
-        raw_limit = os.getenv("FFMPEG_CONCURRENCY", "3").strip()
+        raw_limit = os.getenv("FFMPEG_CONCURRENCY", "4").strip()
         if raw_limit in {"", "0"}:
             return None
         limit = max(1, int(raw_limit))
