@@ -1,7 +1,7 @@
 import pytest
 
 from app.jobs.adapters import BulkDissectAdapter
-from app.legacy.utils.source import _artists_from_embed_html, extract_youtube_video_id
+from app.legacy.utils.source import _artists_from_embed_html, download_youtube_audio, extract_youtube_video_id
 
 
 def test_source_field_is_canonical_source():
@@ -59,3 +59,69 @@ def test_chorus_fallback_uses_longest_useful_segment():
     )
 
     assert segment["id"] == "seg-4"
+
+
+@pytest.mark.asyncio
+async def test_download_youtube_audio_retries_transient_yt_dlp_error(monkeypatch, tmp_path):
+    calls = []
+    sleeps = []
+
+    class FakeProc:
+        def __init__(self, returncode: int, stderr: bytes, *, write_output: bool = False):
+            self.returncode = returncode
+            self.stderr = stderr
+            self.write_output = write_output
+
+        async def communicate(self):
+            if self.write_output:
+                (tmp_path / "source.wav").write_bytes(b"audio")
+            else:
+                (tmp_path / "source.part").write_bytes(b"partial")
+            return b"", self.stderr
+
+    async def fake_create_subprocess_exec(*cmd, stdout, stderr):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return FakeProc(1, b"ERROR: unable to download video data: HTTP Error 403: Forbidden\n")
+        return FakeProc(0, b"", write_output=True)
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setenv("YTDLP_DOWNLOAD_ATTEMPTS", "3")
+    monkeypatch.setenv("YTDLP_RETRY_DELAY_SECONDS", "0.5")
+    monkeypatch.setattr("app.legacy.utils.source.shutil.which", lambda binary: "/usr/bin/yt-dlp")
+    monkeypatch.setattr("app.legacy.utils.source.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("app.legacy.utils.source.asyncio.sleep", fake_sleep)
+
+    result = await download_youtube_audio("https://www.youtube.com/watch?v=dQw4w9WgXcQ", tmp_path)
+
+    assert result == str(tmp_path / "source.wav")
+    assert len(calls) == 2
+    assert sleeps == [0.5]
+    assert not (tmp_path / "source.part").exists()
+
+
+@pytest.mark.asyncio
+async def test_download_youtube_audio_does_not_retry_permanent_yt_dlp_error(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return b"", b"ERROR: Private video\n"
+
+    async def fake_create_subprocess_exec(*cmd, stdout, stderr):
+        calls.append(cmd)
+        return FakeProc()
+
+    monkeypatch.setenv("YTDLP_DOWNLOAD_ATTEMPTS", "3")
+    monkeypatch.setenv("YTDLP_RETRY_DELAY_SECONDS", "0")
+    monkeypatch.setattr("app.legacy.utils.source.shutil.which", lambda binary: "/usr/bin/yt-dlp")
+    monkeypatch.setattr("app.legacy.utils.source.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Private video"):
+        await download_youtube_audio("https://www.youtube.com/watch?v=dQw4w9WgXcQ", tmp_path)
+
+    assert len(calls) == 1

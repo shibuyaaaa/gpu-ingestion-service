@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 SPOTIFY_TRACK_RE = re.compile(r"(?:spotify:track:|open\.spotify\.com/track/)([A-Za-z0-9]+)")
 YOUTUBE_URL_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|music\.youtube\.com/watch\?v=)([A-Za-z0-9_-]{11})")
+TRANSIENT_YTDLP_ERROR_RE = re.compile(
+    r"(HTTP Error (?:403|408|409|425|429|5\d\d)|timed out|timeout|temporar(?:y|ily)|unavailable|try again)",
+    re.IGNORECASE,
+)
 
 _spotify_access_token: str | None = None
 _spotify_token_expires_at = 0.0
@@ -87,30 +91,75 @@ async def download_youtube_audio(youtube_url: str, output_dir: str | Path) -> st
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     template = str(output / "source.%(ext)s")
-    proc = await asyncio.create_subprocess_exec(
-        "yt-dlp",
-        *_yt_dlp_js_args(),
-        "-x",
-        "--audio-format",
-        "wav",
-        "-o",
-        template,
-        youtube_url,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(stderr.decode("utf-8", errors="replace")[-1000:])
-    matches = sorted(output.glob("source.*"))
-    if not matches:
-        raise RuntimeError("yt-dlp did not produce an audio file")
-    return str(matches[0])
+    attempts = max(1, _int_env("YTDLP_DOWNLOAD_ATTEMPTS", 3))
+    retry_delay = max(0.0, _float_env("YTDLP_RETRY_DELAY_SECONDS", 2.0))
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        _remove_partial_ytdlp_outputs(output)
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp",
+            *_yt_dlp_js_args(),
+            "-x",
+            "--audio-format",
+            "wav",
+            "-o",
+            template,
+            youtube_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        error_text = stderr.decode("utf-8", errors="replace")[-1000:]
+        if proc.returncode == 0:
+            matches = sorted(output.glob("source.*"))
+            if matches:
+                return str(matches[0])
+            error_text = "yt-dlp did not produce an audio file"
+        last_error = error_text
+        if attempt >= attempts or (proc.returncode != 0 and not _is_transient_ytdlp_error(error_text)):
+            break
+        error_lines = error_text.strip().splitlines()
+        logger.warning(
+            "yt-dlp download failed transiently on attempt %d/%d: %s",
+            attempt,
+            attempts,
+            error_lines[-1] if error_lines else error_text,
+        )
+        if retry_delay:
+            await asyncio.sleep(retry_delay)
+    raise RuntimeError(last_error or "yt-dlp did not produce an audio file")
 
 
 def extract_youtube_video_id(source: str) -> str | None:
     match = YOUTUBE_URL_RE.search(source)
     return match.group(1) if match else None
+
+
+def _is_transient_ytdlp_error(error_text: str) -> bool:
+    return bool(TRANSIENT_YTDLP_ERROR_RE.search(error_text or ""))
+
+
+def _remove_partial_ytdlp_outputs(output_dir: Path) -> None:
+    for path in output_dir.glob("source.*"):
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            logger.warning("failed to remove partial yt-dlp output: %s", path)
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return int(value)
+
+
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
 
 
 async def get_youtube_metadata(youtube_url: str) -> dict[str, Any]:
