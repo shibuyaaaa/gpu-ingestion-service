@@ -767,6 +767,7 @@ async def test_segment_stem_cache_reuses_sliced_full_stem_segments(monkeypatch, 
         work_dir=tmp_path / "work",
         dry_run_mode=False,
         segment_stem_cache_enabled=True,
+        gcs_segment_upload_cache_enabled=False,
     )
     store = JobStore(settings.queue_db_path)
     context = JobContext(
@@ -1142,6 +1143,165 @@ async def test_other_stem_uploads_use_memory_cache_without_gcs_calls(tmp_path):
     assert "gcs_segment_upload_cache_lookup_count" not in result["timings"]
     assert "gcs_segment_upload_count" not in result["timings"]
     assert result["outputs"]["vocals"].endswith(f"{cache_key}/vocals.mp3")
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
+
+
+async def test_hot_full_stem_urls_skip_local_segment_restore(monkeypatch, tmp_path):
+    from app.jobs import adapters
+
+    async def fail_extract_stem_segments(full_stem_paths, output_dir, segment):
+        raise AssertionError("should not slice full stems when URLs are hot")
+
+    class FakeGCS:
+        async def exists(self, gcs_path):
+            raise AssertionError("should not call GCS exists when URLs are hot")
+
+        async def upload(self, local_path, gcs_path, *, content_type):
+            raise AssertionError("should not upload when URLs are hot")
+
+    class FakeWriter:
+        async def publish_segment(self, *, job, segment, segment_result, status):
+            return LibraryPublishResult(enabled=True, song_id="song-1", status=status)
+
+    monkeypatch.setattr(BulkDissectAdapter, "_extract_stem_segments", staticmethod(fail_extract_stem_segments))
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+        cdn_base_url="https://cdn.test",
+    )
+    store = JobStore(settings.queue_db_path)
+    job, _ = store.enqueue({"job_id": "hot-full-stems", "job_type": "bulk_dissect", "source": "song"})
+    work_dir = tmp_path / "work" / "jobs" / job.id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    segment = {"id": "seg-1", "start": 0.0, "end": 8.0, "label": "chorus"}
+    youtube_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    cache_key = adapters._segment_stem_cache_key({"youtube_url": youtube_url}, segment)
+    assert cache_key
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
+    for stem in ("vocals", "drums", "bass"):
+        adapters._remember_gcs_upload_url(
+            f"gpu-ingestion/cache/segment-stems/{cache_key}/{stem}.mp3",
+            f"https://cdn.test/gpu-ingestion/cache/segment-stems/{cache_key}/{stem}.mp3",
+            max_entries=100,
+        )
+    store.complete_stage(
+        job.id,
+        next_stage=JobStage.PROCESS,
+        artifacts={
+            "work_dir": str(work_dir),
+            "audio_path": str(tmp_path / "source.wav"),
+            "youtube_url": youtube_url,
+            "full_stem_paths": {
+                "other": "unused-other.wav",
+                "vocals": "unused-vocals.wav",
+                "drums": "unused-drums.wav",
+                "bass": "unused-bass.wav",
+            },
+        },
+    )
+    job = store.get(job.id)
+    context = JobContext(
+        settings=settings,
+        store=store,
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=FakeWriter(),
+    )
+
+    result = await BulkDissectAdapter()._process_segment(
+        job,
+        context,
+        segment,
+        output_prefix="segments",
+        stem_group="other",
+    )
+
+    assert result["stem_source"] == "gcs_upload_url_cache"
+    assert result["stem_paths"] == {}
+    assert result["timings"]["segment_output_url_cache_hit"] == 1
+    assert result["timings"]["segment_output_url_cache_stem_count"] == 3
+    assert result["timings"]["gcs_segment_upload_memory_cache_hit_count"] == 3
+    assert set(result["outputs"]) == {"vocals", "drums", "bass"}
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
+
+
+async def test_hot_chord_url_shortcut_still_publishes_partial(tmp_path):
+    from app.jobs import adapters
+
+    events = []
+
+    class FakeGCS:
+        async def exists(self, gcs_path):
+            raise AssertionError("should not call GCS exists when URLs are hot")
+
+        async def upload(self, local_path, gcs_path, *, content_type):
+            raise AssertionError("should not upload when URLs are hot")
+
+    class FakeWriter:
+        async def publish_segment(self, *, job, segment, segment_result, status):
+            events.append((status, dict(segment_result["outputs"])))
+            return LibraryPublishResult(enabled=True, song_id="song-1", status=status)
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+        cdn_base_url="https://cdn.test",
+    )
+    store = JobStore(settings.queue_db_path)
+    job, _ = store.enqueue({"job_id": "hot-chord", "job_type": "bulk_dissect", "source": "song"})
+    work_dir = tmp_path / "work" / "jobs" / job.id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    segment = {"id": "seg-1", "start": 0.0, "end": 8.0, "label": "chorus"}
+    youtube_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    cache_key = adapters._segment_stem_cache_key({"youtube_url": youtube_url}, segment)
+    assert cache_key
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
+    adapters._remember_gcs_upload_url(
+        f"gpu-ingestion/cache/segment-stems/{cache_key}/other.mp3",
+        f"https://cdn.test/gpu-ingestion/cache/segment-stems/{cache_key}/other.mp3",
+        max_entries=100,
+    )
+    store.complete_stage(
+        job.id,
+        next_stage=JobStage.PROCESS,
+        artifacts={
+            "work_dir": str(work_dir),
+            "audio_path": str(tmp_path / "source.wav"),
+            "youtube_url": youtube_url,
+            "full_stem_paths": {
+                "other": "unused-other.wav",
+                "vocals": "unused-vocals.wav",
+            },
+        },
+    )
+    job = store.get(job.id)
+    context = JobContext(
+        settings=settings,
+        store=store,
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=FakeWriter(),
+    )
+
+    result = await BulkDissectAdapter()._process_segment(
+        job,
+        context,
+        segment,
+        output_prefix="segments",
+        stem_group="chord",
+    )
+
+    assert result["stem_source"] == "gcs_upload_url_cache"
+    assert result["early_library_publish"]["status"] == "partial"
+    assert events == [("partial", result["outputs"])]
+    assert result["outputs"]["other"].endswith(f"{cache_key}/other.mp3")
     adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
 
 

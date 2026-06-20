@@ -475,6 +475,23 @@ class DissectAdapter(JobAdapter):
         existing_stem_paths = job.artifacts.get("stem_paths") or {}
         full_stem_paths = job.artifacts.get("full_stem_paths") or {}
         can_slice_full_stems = bool(full_stem_paths) and not context.settings.dry_run_mode
+        upload_cache_key = _segment_stem_cache_key(job.artifacts, segment)
+        known_source_stems = existing_stem_paths or (full_stem_paths if can_slice_full_stems else {})
+        known_selected_stems = dict(_filter_stems(known_source_stems, stem_group)) if known_source_stems else {}
+        if known_selected_stems and not context.settings.dry_run_mode:
+            hot_result = await self._try_process_segment_from_hot_urls(
+                job=job,
+                context=context,
+                segment=segment,
+                segment_id=segment_id,
+                segment_dir=segment_dir,
+                stem_group=stem_group,
+                stem_names=known_selected_stems.keys(),
+                upload_cache_key=upload_cache_key,
+                timings=timings,
+            )
+            if hot_result is not None:
+                return hot_result
         needs_source_segment = not existing_stem_paths and not can_slice_full_stems
         existing_segment_path = job.artifacts.get("segment_path")
         segment_path = Path(existing_segment_path) if existing_segment_path else None
@@ -538,7 +555,6 @@ class DissectAdapter(JobAdapter):
                 stem_source = "segment_htdemucs"
 
         selected_stems = dict(_filter_stems(stems, stem_group))
-        upload_cache_key = _segment_stem_cache_key(job.artifacts, segment)
 
         if context.settings.dry_run_mode:
             uploaded = {stem: path for stem, path in selected_stems.items()}
@@ -632,6 +648,79 @@ class DissectAdapter(JobAdapter):
             "timings": timings,
             "outputs": uploaded,
             "early_library_publish": early_library_publish if not context.settings.dry_run_mode else None,
+            "manifest_url": manifest_url,
+        }
+
+    async def _try_process_segment_from_hot_urls(
+        self,
+        *,
+        job: JobRecord,
+        context: JobContext,
+        segment: dict[str, Any],
+        segment_id: str,
+        segment_dir: Path,
+        stem_group: str,
+        stem_names: Any,
+        upload_cache_key: str | None,
+        timings: dict[str, float],
+    ) -> dict[str, Any] | None:
+        if not upload_cache_key or not context.settings.gcs_segment_upload_cache_enabled:
+            return None
+        started = time.perf_counter()
+        uploaded = _try_cached_gcs_upload_urls_for_stems(
+            stem_names=stem_names,
+            job_id=job.id,
+            segment_id=segment_id,
+            upload_cache_key=upload_cache_key,
+            context=context,
+            timings=timings,
+        )
+        if uploaded is None:
+            return None
+
+        timings["segment_output_url_cache_hit"] = 1
+        timings["segment_output_url_cache_stem_count"] = len(uploaded)
+        timings["stem_segment_extract_seconds"] = 0.0
+        timings["segment_stem_cache_restore_seconds"] = 0.0
+        early_library_publish = None
+        if any(_canonical_stem_type(stem) == "chord" for stem in uploaded):
+            chord_result = {
+                "segment": segment,
+                "segment_path": None,
+                "stem_paths": {},
+                "outputs": dict(uploaded),
+            }
+            chord_publish = await context.library_writer.publish_segment(
+                job=job,
+                segment=segment,
+                segment_result=chord_result,
+                status="partial",
+            )
+            early_library_publish = chord_publish.to_dict()
+            _ensure_library_publish_ok(early_library_publish)
+        timings["upload_and_publish_seconds"] = round(time.perf_counter() - started, 6)
+
+        manifest_url = None
+        if context.settings.segment_manifest_upload_enabled:
+            manifest_url = await _upload_segment_manifest(
+                job=job,
+                context=context,
+                segment_dir=segment_dir,
+                segment=segment,
+                segment_id=segment_id,
+                stem_group=stem_group,
+                outputs=uploaded,
+                library_publish=early_library_publish,
+            )
+
+        return {
+            "segment": segment,
+            "segment_path": None,
+            "stem_paths": {},
+            "stem_source": "gcs_upload_url_cache",
+            "timings": timings,
+            "outputs": uploaded,
+            "early_library_publish": early_library_publish,
             "manifest_url": manifest_url,
         }
 
@@ -1551,6 +1640,32 @@ def _try_cached_gcs_upload_url_for_stem(
         context=context,
         timings=timings,
     )
+
+
+def _try_cached_gcs_upload_urls_for_stems(
+    *,
+    stem_names: Any,
+    job_id: str,
+    segment_id: str,
+    upload_cache_key: str | None,
+    context: JobContext,
+    timings: dict[str, float] | None,
+) -> dict[str, str] | None:
+    uploaded = {}
+    for stem in stem_names:
+        stem_name = str(stem)
+        cached_url = _try_cached_gcs_upload_url_for_stem(
+            stem=stem_name,
+            job_id=job_id,
+            segment_id=segment_id,
+            upload_cache_key=upload_cache_key,
+            context=context,
+            timings=timings,
+        )
+        if cached_url is None:
+            return None
+        uploaded[stem_name] = cached_url
+    return uploaded
 
 
 def _try_cached_gcs_upload_url(
