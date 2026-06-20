@@ -828,13 +828,15 @@ class JobStore:
                 """,
                 (JobStatus.COMPLETED.value, JobStage.ANALYZE.value, JobStage.PROCESS.value, row_limit),
             ).fetchall()
+            job_ids = [str(row["id"]) for row in rows]
+            event_times = _latest_event_times(conn, job_ids)
 
         analyze_timings: list[dict[str, Any]] = []
         process_timings_by_mode: dict[str, list[dict[str, Any]]] = {}
         latest: list[dict[str, Any]] = []
         for row in rows:
             artifacts = json.loads(row["artifacts_json"] or "{}")
-            duration = max(0.0, float(row["updated_at"] or 0.0) - float(row["created_at"] or 0.0))
+            durations = _job_duration_breakdown(row, event_times.get(str(row["id"]), {}))
             if row["stage"] == JobStage.ANALYZE.value:
                 timings = artifacts.get("analysis_timings") or {}
                 if isinstance(timings, dict):
@@ -844,7 +846,7 @@ class JobStore:
                         "job_id": row["id"],
                         "job_type": row["job_type"],
                         "stage": row["stage"],
-                        "duration_seconds": round(duration, 6),
+                        **durations,
                         "timings": _timing_subset(
                             timings,
                             [
@@ -876,7 +878,7 @@ class JobStore:
                     "stage": row["stage"],
                     "process_mode": process_mode,
                     "segment_id": final_outputs.get("segment_id") or artifacts.get("segment_id"),
-                    "duration_seconds": round(duration, 6),
+                    **durations,
                     "timings": _timing_subset(
                         timings,
                         [
@@ -1071,6 +1073,41 @@ def _timing_subset(timings: Any, keys: list[str]) -> dict[str, Any]:
     if not isinstance(timings, dict):
         return {}
     return {key: timings[key] for key in keys if key in timings}
+
+
+def _latest_event_times(conn: sqlite3.Connection, job_ids: list[str]) -> dict[str, dict[str, float]]:
+    if not job_ids:
+        return {}
+    placeholders = ",".join("?" for _ in job_ids)
+    rows = conn.execute(
+        f"""
+        SELECT job_id, event_type, MAX(created_at) AS created_at
+        FROM job_events
+        WHERE job_id IN ({placeholders})
+          AND event_type IN (?, ?)
+        GROUP BY job_id, event_type
+        """,
+        (*job_ids, JobEventType.CLAIMED.value, JobEventType.STAGE_COMPLETED.value),
+    ).fetchall()
+    event_times: dict[str, dict[str, float]] = {}
+    for row in rows:
+        event_times.setdefault(str(row["job_id"]), {})[str(row["event_type"])] = float(row["created_at"])
+    return event_times
+
+
+def _job_duration_breakdown(row: sqlite3.Row, event_times: dict[str, float]) -> dict[str, float | None]:
+    created_at = float(row["created_at"] or 0.0)
+    updated_at = float(row["updated_at"] or 0.0)
+    claimed_at = event_times.get(JobEventType.CLAIMED.value)
+    completed_at = event_times.get(JobEventType.STAGE_COMPLETED.value) or updated_at
+    total = max(0.0, updated_at - created_at)
+    queue_wait = max(0.0, claimed_at - created_at) if claimed_at is not None else None
+    processing = max(0.0, completed_at - claimed_at) if claimed_at is not None else None
+    return {
+        "duration_seconds": round(total, 6),
+        "queue_wait_seconds": round(queue_wait, 6) if queue_wait is not None else None,
+        "processing_seconds": round(processing, 6) if processing is not None else None,
+    }
 
 
 def _add_event_conn(

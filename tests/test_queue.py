@@ -241,6 +241,11 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["process_by_mode"]["segment_other"]["count"] == 1
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["stem_segment_extract_seconds"] == 1.25
         assert [item["job_id"] for item in summary["latest"]] == ["process", "analyze"]
+        assert summary["latest"][0]["queue_wait_seconds"] is not None
+        assert summary["latest"][0]["processing_seconds"] is not None
+        assert summary["latest"][0]["duration_seconds"] >= summary["latest"][0]["processing_seconds"]
+        assert summary["latest"][1]["queue_wait_seconds"] is not None
+        assert summary["latest"][1]["processing_seconds"] is not None
 
 
 def test_recent_timing_summary_caps_limit():
