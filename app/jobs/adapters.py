@@ -12,7 +12,12 @@ from app.jobs.base import JobAdapter, StageResult
 from app.jobs.context import JobContext
 from app.library_membership import LibraryLookupResult
 from app.legacy.audio import AudioOps
-from app.legacy.utils.source import download_youtube_audio, resolve_source_metadata, resolve_youtube_match
+from app.legacy.utils.source import (
+    download_youtube_audio,
+    extract_youtube_video_id,
+    resolve_source_metadata,
+    resolve_youtube_match,
+)
 from app.queue import JobRecord, JobStage, JobType
 
 
@@ -49,17 +54,21 @@ class DissectAdapter(JobAdapter):
             }
         else:
             payload_metadata = job.payload.get("spotify_metadata")
+            skip_library_precheck = _truthy_payload_flag(job, "skip_library_precheck")
             if isinstance(payload_metadata, dict) and payload_metadata.get("title"):
                 timings["source_metadata_seconds"] = 0.0
                 resolved = {
                     "source": source,
                     "spotify_metadata": payload_metadata,
                 }
+            elif skip_library_precheck and extract_youtube_video_id(source):
+                timings["source_metadata_seconds"] = 0.0
+                resolved = _minimal_youtube_resolved(source)
             else:
                 started = time.perf_counter()
                 resolved = await resolve_source_metadata(source)
                 timings["source_metadata_seconds"] = round(time.perf_counter() - started, 6)
-            if _truthy_payload_flag(job, "skip_library_precheck"):
+            if skip_library_precheck:
                 timings["library_precheck_seconds"] = 0.0
                 library_result = LibraryLookupResult(
                     checked=False,
@@ -91,9 +100,12 @@ class DissectAdapter(JobAdapter):
                         },
                     },
                 )
-            started = time.perf_counter()
-            resolved = await resolve_youtube_match(resolved)
-            timings["youtube_match_seconds"] = round(time.perf_counter() - started, 6)
+            if resolved.get("youtube_url") and resolved.get("youtube_match"):
+                timings["youtube_match_seconds"] = 0.0
+            else:
+                started = time.perf_counter()
+                resolved = await resolve_youtube_match(resolved)
+                timings["youtube_match_seconds"] = round(time.perf_counter() - started, 6)
             started = time.perf_counter()
             audio_path = await download_youtube_audio(resolved["youtube_url"], work_dir)
             timings["youtube_download_seconds"] = round(time.perf_counter() - started, 6)
@@ -948,3 +960,38 @@ def _truthy_payload_flag(job: JobRecord, key: str) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _minimal_youtube_resolved(source: str) -> dict[str, Any]:
+    video_id = extract_youtube_video_id(source)
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else source
+    return {
+        "source": source,
+        "youtube_url": youtube_url,
+        "youtube_match": {
+            "video_id": video_id,
+            "title": None,
+            "channel": "",
+            "duration_seconds": 0,
+            "url": youtube_url,
+            "thumbnail": None,
+            "metadata_source": "skipped_for_direct_youtube_download",
+        },
+        "spotify_metadata": {
+            "spotify_id": None,
+            "title": source,
+            "artist": "",
+            "artists": [],
+            "album": "",
+            "duration_ms": 0,
+            "album_art_url": None,
+            "album_art_highres": None,
+            "album_art_medres": None,
+            "album_art_lowres": None,
+            "isrc": None,
+            "popularity": 0,
+            "query_only": True,
+            "source_type": "youtube",
+            "metadata_source": "skipped_for_direct_youtube_download",
+        },
+    }
