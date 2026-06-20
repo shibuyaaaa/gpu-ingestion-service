@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import time
 import uuid
@@ -111,6 +112,42 @@ def test_claim_batch_prioritizes_higher_priority_jobs():
         claimed = store.claim_batch([JobStage.DOWNLOAD], "worker-1", limit=2)
 
         assert [job.id for job in claimed] == ["quick", "bulk"]
+
+
+def test_claim_query_uses_scheduling_order_index_without_temp_sort():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=20)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        for idx in range(5):
+            store.enqueue_process_child(
+                parent_job=parent,
+                child_id=f"root:bulk:seg-{idx}:chord",
+                job_type=JobType.BULK_DISSECT,
+                payload={"source": "song", "root_job_id": "root"},
+                artifacts={"process_mode": "segment_chord", "segment_id": f"seg-{idx}", "requires_gpu": False},
+                priority=PROCESS_PRIORITY_BULK_CHORD,
+            )
+
+        with sqlite3.connect(store.db_path) as conn:
+            plan = conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT * FROM jobs
+                WHERE status = ?
+                  AND available_at <= ?
+                  AND stage = ?
+                  AND COALESCE(json_extract(artifacts_json, '$.requires_gpu'), 1) = 0
+                ORDER BY priority DESC,
+                         created_at ASC,
+                         id ASC
+                LIMIT ?
+                """,
+                (JobStatus.QUEUED.value, time.time(), JobStage.PROCESS.value, 1),
+            ).fetchall()
+
+        detail = " ".join(str(row[-1]) for row in plan)
+        assert "idx_jobs_claim" in detail
+        assert "USE TEMP B-TREE" not in detail
 
 
 def test_process_claim_order_prioritizes_chords_before_other_stems():
