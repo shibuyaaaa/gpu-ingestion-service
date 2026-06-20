@@ -150,6 +150,30 @@ def test_claim_query_uses_scheduling_order_index_without_temp_sort():
         assert "USE TEMP B-TREE" not in detail
 
 
+def test_active_depth_query_uses_partial_active_index():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=20)
+        active, _ = store.enqueue({"job_id": "active", "job_type": "bulk_dissect", "source": "song"})
+        done, _ = store.enqueue({"job_id": "done", "job_type": "bulk_dissect", "source": "song"})
+        store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        store.complete_stage(active.id, next_stage=None)
+        store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        store.complete_stage(done.id, next_stage=None)
+        store.enqueue({"job_id": "queued", "job_type": "bulk_dissect", "source": "song"})
+
+        with sqlite3.connect(store.db_path) as conn:
+            plan = conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT COUNT(*) FROM jobs
+                WHERE status NOT IN ('completed', 'failed')
+                """
+            ).fetchall()
+
+        detail = " ".join(str(row[-1]) for row in plan)
+        assert "idx_jobs_active_depth" in detail
+
+
 def test_process_claim_order_prioritizes_chords_before_other_stems():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)

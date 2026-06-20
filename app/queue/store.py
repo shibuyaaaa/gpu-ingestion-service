@@ -14,6 +14,7 @@ DEFAULT_JOB_PRIORITIES = {
     JobType.QUICK_DISSECT: 350,
     JobType.BULK_DISSECT: 10,
 }
+ACTIVE_JOBS_WHERE_SQL = "status NOT IN ('completed', 'failed')"
 
 
 class QueueFull(RuntimeError):
@@ -88,6 +89,9 @@ class JobStore:
                 DROP INDEX IF EXISTS idx_jobs_claim;
                 CREATE INDEX IF NOT EXISTS idx_jobs_claim
                     ON jobs(status, priority DESC, created_at ASC, id ASC, available_at, stage);
+                CREATE INDEX IF NOT EXISTS idx_jobs_active_depth
+                    ON jobs(status)
+                    WHERE status NOT IN ('completed', 'failed');
                 DROP INDEX IF EXISTS idx_jobs_payload_root;
                 CREATE INDEX IF NOT EXISTS idx_jobs_payload_root_status
                     ON jobs(json_extract(payload_json, '$.root_job_id'), status, id);
@@ -121,8 +125,7 @@ class JobStore:
         now = time.time()
         with self._lock, self._connect() as conn:
             current_depth = conn.execute(
-                "SELECT COUNT(*) FROM jobs WHERE status NOT IN (?, ?)",
-                (JobStatus.COMPLETED.value, JobStatus.FAILED.value),
+                f"SELECT COUNT(*) FROM jobs WHERE {ACTIVE_JOBS_WHERE_SQL}",
             ).fetchone()[0]
             existing_by_source = self.get_by_source_message(source_message_id)
             if existing_by_source:
@@ -279,8 +282,7 @@ class JobStore:
                 existing_ids = {row["id"] for row in existing_rows}
                 new_specs = [spec for spec in specs if spec["child_id"] not in existing_ids]
                 current_depth = conn.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE status NOT IN (?, ?)",
-                    (JobStatus.COMPLETED.value, JobStatus.FAILED.value),
+                    f"SELECT COUNT(*) FROM jobs WHERE {ACTIVE_JOBS_WHERE_SQL}",
                 ).fetchone()[0]
                 if current_depth + len(new_specs) > self.max_depth:
                     raise QueueFull(f"queue depth {current_depth} + {len(new_specs)} new jobs > max {self.max_depth}")
@@ -713,10 +715,9 @@ class JobStore:
                     """
                     SELECT stage, COUNT(*) AS count
                     FROM jobs
-                    WHERE status NOT IN (?, ?)
+                    WHERE status NOT IN ('completed', 'failed')
                     GROUP BY stage
-                    """,
-                    (JobStatus.COMPLETED.value, JobStatus.FAILED.value),
+                    """
                 )
             }
             by_status = {
@@ -731,20 +732,18 @@ class JobStore:
                     """
                     SELECT priority, COUNT(*) AS count
                     FROM jobs
-                    WHERE status NOT IN (?, ?)
+                    WHERE status NOT IN ('completed', 'failed')
                     GROUP BY priority
                     ORDER BY priority DESC
-                    """,
-                    (JobStatus.COMPLETED.value, JobStatus.FAILED.value),
+                    """
                 )
             }
             oldest = conn.execute(
                 """
                 SELECT MIN(created_at) AS created_at
                 FROM jobs
-                WHERE status NOT IN (?, ?)
-                """,
-                (JobStatus.COMPLETED.value, JobStatus.FAILED.value),
+                WHERE status NOT IN ('completed', 'failed')
+                """
             ).fetchone()["created_at"]
         now = time.time()
         return {
