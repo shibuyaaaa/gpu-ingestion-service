@@ -252,6 +252,10 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
                 "segment_result": {
                     "timings": {
                         "stem_segment_extract_seconds": 1.25,
+                        "gcs_segment_upload_cache_lookup_count": 3,
+                        "gcs_segment_upload_cache_hit_count": 2,
+                        "gcs_segment_upload_cache_miss_count": 1,
+                        "gcs_segment_upload_count": 1,
                         "upload_and_publish_seconds": 0.75,
                         "gpu_sample_count": 2,
                         "gpu_utilization_avg_pct": 42.0,
@@ -282,6 +286,10 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["analyze"]["avg_seconds"]["processing_seconds"] is not None
         assert summary["process_by_mode"]["segment_other"]["count"] == 1
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["stem_segment_extract_seconds"] == 1.25
+        assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gcs_segment_upload_cache_lookup_count"] == 3.0
+        assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gcs_segment_upload_cache_hit_count"] == 2.0
+        assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gcs_segment_upload_cache_miss_count"] == 1.0
+        assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gcs_segment_upload_count"] == 1.0
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gpu_utilization_avg_pct"] == 42.0
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gpu_memory_used_max_mb"] == 8000.0
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["queue_wait_seconds"] is not None
@@ -303,6 +311,53 @@ def test_recent_timing_summary_caps_limit():
 
         assert summary["limit"] == 1000
         assert summary["completed_jobs_sampled"] == 0
+
+
+def test_child_jobs_returns_descendant_details_ordered_by_priority():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        root, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        low = store.enqueue_process_child(
+            parent_job=root,
+            child_id="root:bulk:seg-1:other",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "process_mode": "segment_other", "segment_id": "seg-1"},
+            artifacts={"process_mode": "segment_other", "process_group": "bulk", "segment_id": "seg-1"},
+            priority=PROCESS_PRIORITY_BULK_OTHER,
+        )
+        high = store.enqueue_process_child(
+            parent_job=root,
+            child_id="root:bulk:seg-1:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "process_mode": "segment_chord", "segment_id": "seg-1"},
+            artifacts={"process_mode": "segment_chord", "process_group": "bulk", "segment_id": "seg-1"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        store.claim_next([JobStage.PROCESS], "worker")
+        store.complete_stage(
+            high.id,
+            next_stage=None,
+            artifacts={
+                "final_outputs": {
+                    "process_mode": "segment_chord",
+                    "process_group": "bulk",
+                    "segment_id": "seg-1",
+                    "chord_outputs": {"other": "https://cdn.test/other.mp3"},
+                },
+                "segment_result": {"timings": {"gcs_segment_upload_cache_hit_count": 1}},
+            },
+        )
+
+        children = store.child_jobs(root.id)
+
+        assert [child["id"] for child in children] == [high.id, low.id]
+        assert children[0]["status"] == JobStatus.COMPLETED.value
+        assert children[0]["process_mode"] == "segment_chord"
+        assert children[0]["process_group"] == "bulk"
+        assert children[0]["segment_id"] == "seg-1"
+        assert children[0]["final_outputs"]["chord_outputs"]["other"] == "https://cdn.test/other.mp3"
+        assert children[0]["timings"]["gcs_segment_upload_cache_hit_count"] == 1
+        assert children[1]["status"] == JobStatus.QUEUED.value
 
 
 def test_recent_timing_summary_keeps_download_timings_after_stage_progression():

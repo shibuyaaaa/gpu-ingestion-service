@@ -944,6 +944,12 @@ class JobStore:
                             "segment_stem_cache_restore_seconds",
                             "segment_stem_cache_store_seconds",
                             "source_segment_extract_seconds",
+                            "gcs_segment_upload_cache_lookup_count",
+                            "gcs_segment_upload_cache_hit_count",
+                            "gcs_segment_upload_cache_miss_count",
+                            "gcs_segment_upload_cache_exists_seconds",
+                            "gcs_segment_upload_convert_seconds",
+                            "gcs_segment_upload_count",
                             "upload_and_publish_seconds",
                             "gpu_sample_count",
                             "gpu_utilization_avg_pct",
@@ -1020,6 +1026,12 @@ class JobStore:
                         "segment_stem_cache_restore_seconds",
                         "segment_stem_cache_store_seconds",
                         "source_segment_extract_seconds",
+                        "gcs_segment_upload_cache_lookup_count",
+                        "gcs_segment_upload_cache_hit_count",
+                        "gcs_segment_upload_cache_miss_count",
+                        "gcs_segment_upload_cache_exists_seconds",
+                        "gcs_segment_upload_convert_seconds",
+                        "gcs_segment_upload_count",
                         "upload_and_publish_seconds",
                         "gpu_sample_count",
                         "gpu_sample_available_count",
@@ -1060,6 +1072,59 @@ class JobStore:
             }
             for row in rows
         ]
+
+    def child_jobs(self, root_job_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        row_limit = max(1, min(int(limit), 1000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, job_type, stage, status, priority, payload_json, artifacts_json,
+                       error, created_at, updated_at
+                FROM jobs
+                WHERE json_extract(payload_json, '$.root_job_id') = ?
+                ORDER BY priority DESC, created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (root_job_id, row_limit),
+            ).fetchall()
+
+        children = []
+        for row in rows:
+            payload = json.loads(row["payload_json"] or "{}")
+            artifacts = json.loads(row["artifacts_json"] or "{}")
+            final_outputs = artifacts.get("final_outputs") or {}
+            segment_result = artifacts.get("segment_result") or {}
+            process_mode = (
+                final_outputs.get("process_mode")
+                or artifacts.get("process_mode")
+                or payload.get("process_mode")
+            )
+            segment_id = (
+                final_outputs.get("segment_id")
+                or artifacts.get("segment_id")
+                or payload.get("segment_id")
+            )
+            children.append(
+                {
+                    "id": row["id"],
+                    "job_type": row["job_type"],
+                    "stage": row["stage"],
+                    "status": row["status"],
+                    "priority": int(row["priority"]),
+                    "process_mode": process_mode,
+                    "process_group": final_outputs.get("process_group")
+                    or artifacts.get("process_group")
+                    or payload.get("process_group"),
+                    "segment_id": segment_id,
+                    "parent_job_id": payload.get("parent_job_id"),
+                    "error": row["error"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "final_outputs": final_outputs,
+                    "timings": segment_result.get("timings") or {},
+                }
+            )
+        return children
 
     def child_summary(self, root_job_id: str, *, exclude_job_id: str | None = None) -> dict[str, int]:
         with self._connect() as conn:

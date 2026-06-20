@@ -810,7 +810,14 @@ async def test_segment_stem_cache_reuses_sliced_full_stem_segments(monkeypatch, 
     assert Path(second["stem_paths"]["vocals"]).exists()
 
 
-async def test_cached_segment_upload_reuses_existing_gcs_object(tmp_path):
+async def test_cached_segment_upload_reuses_existing_gcs_object(monkeypatch, tmp_path):
+    converted = False
+
+    async def fake_convert_to_mp3(source, target):
+        nonlocal converted
+        converted = True
+        Path(target).write_bytes(b"converted")
+
     class FakeGCS:
         def __init__(self):
             self.uploads = []
@@ -844,18 +851,25 @@ async def test_cached_segment_upload_reuses_existing_gcs_object(tmp_path):
             membership=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
         ),
     )
+    monkeypatch.setattr("app.jobs.adapters.AudioOps.convert_to_mp3", fake_convert_to_mp3)
 
+    timings = {}
     url = await BulkDissectAdapter._prepare_and_upload_stem(
         stem="other",
-        path=str(local_stem),
+        path=str(local_stem.with_suffix(".wav")),
         job_id="job-1",
         segment_id="seg-1",
         context=context,
         upload_cache_key="youtube-video-seg",
+        timings=timings,
     )
 
     assert url == "https://cdn.test/gpu-ingestion/cache/segment-stems/youtube-video-seg/other.mp3"
     assert context.gcs.uploads == []
+    assert converted is False
+    assert timings["gcs_segment_upload_cache_lookup_count"] == 1
+    assert timings["gcs_segment_upload_cache_hit_count"] == 1
+    assert "gcs_segment_upload_count" not in timings
 
 
 async def test_full_stem_segment_extraction_runs_stems_concurrently(monkeypatch, tmp_path):

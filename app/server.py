@@ -176,7 +176,8 @@ async def get_job(job_id: str) -> dict[str, Any]:
     job = store.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return {
+    children_summary = store.child_summary(job.id)
+    response = {
         "id": job.id,
         "job_type": job.job_type.value,
         "stage": job.stage.value,
@@ -192,6 +193,10 @@ async def get_job(job_id: str) -> dict[str, Any]:
         "updated_at": job.updated_at,
         "events": store.recent_events(job.id),
     }
+    if children_summary["total"] > 0:
+        response["children_summary"] = children_summary
+        response["children"] = store.child_jobs(job.id)
+    return response
 
 
 @app.get("/ops/jobs/{job_id}/children-summary")

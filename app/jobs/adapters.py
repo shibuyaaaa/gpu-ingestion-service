@@ -558,6 +558,7 @@ class DissectAdapter(JobAdapter):
                     segment_id=segment_id,
                     context=context,
                     upload_cache_key=upload_cache_key,
+                    timings=timings,
                 )
                 if not chord_published:
                     chord_result = {
@@ -584,6 +585,7 @@ class DissectAdapter(JobAdapter):
                         segment_id=segment_id,
                         context=context,
                         upload_cache_key=upload_cache_key,
+                        timings=timings,
                     )
                     for stem, path in other_items
                 )
@@ -623,12 +625,9 @@ class DissectAdapter(JobAdapter):
         segment_id: str,
         context: JobContext,
         upload_cache_key: str | None = None,
+        timings: dict[str, float] | None = None,
     ) -> str:
         local_path = Path(path)
-        if local_path.suffix.lower() != ".mp3":
-            mp3_path = local_path.with_suffix(".mp3")
-            await AudioOps.convert_to_mp3(local_path, mp3_path)
-            local_path = mp3_path
         gcs_path = _segment_upload_gcs_path(
             stem=stem,
             job_id=job_id,
@@ -636,13 +635,28 @@ class DissectAdapter(JobAdapter):
             upload_cache_key=upload_cache_key if context.settings.gcs_segment_upload_cache_enabled else None,
         )
         exists_fn = getattr(context.gcs, "exists", None)
-        if (
+        cache_lookup_enabled = (
             upload_cache_key
             and context.settings.gcs_segment_upload_cache_enabled
             and exists_fn is not None
-            and await exists_fn(gcs_path)
-        ):
-            return f"{context.settings.cdn_base_url}/{gcs_path}"
+        )
+        if cache_lookup_enabled:
+            _add_timing_counter(timings, "gcs_segment_upload_cache_lookup_count")
+            started = time.perf_counter()
+            exists = await exists_fn(gcs_path)
+            _add_timing_counter(timings, "gcs_segment_upload_cache_exists_seconds", time.perf_counter() - started)
+            if exists:
+                _add_timing_counter(timings, "gcs_segment_upload_cache_hit_count")
+                return f"{context.settings.cdn_base_url}/{gcs_path}"
+            _add_timing_counter(timings, "gcs_segment_upload_cache_miss_count")
+
+        if local_path.suffix.lower() != ".mp3":
+            started = time.perf_counter()
+            mp3_path = local_path.with_suffix(".mp3")
+            await AudioOps.convert_to_mp3(local_path, mp3_path)
+            local_path = mp3_path
+            _add_timing_counter(timings, "gcs_segment_upload_convert_seconds", time.perf_counter() - started)
+        _add_timing_counter(timings, "gcs_segment_upload_count")
         return await context.gcs.upload(local_path, gcs_path, content_type="audio/mpeg")
 
     async def _process_fanout_job(self, job: JobRecord, context: JobContext) -> StageResult:
@@ -1469,6 +1483,12 @@ def _prune_unlocked_cache_locks(lock_map: dict[tuple[int, str], asyncio.Lock]) -
             break
         if not lock.locked():
             lock_map.pop(key, None)
+
+
+def _add_timing_counter(timings: dict[str, float] | None, key: str, value: float = 1.0) -> None:
+    if timings is None:
+        return
+    timings[key] = round(float(timings.get(key, 0.0)) + float(value), 6)
 
 
 def cache_lock_status() -> dict[str, Any]:
