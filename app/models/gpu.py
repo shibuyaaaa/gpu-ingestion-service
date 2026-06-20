@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,7 +31,21 @@ class GPUState:
 class GPUProbe:
     """Lightweight `nvidia-smi` wrapper for ops endpoints."""
 
+    def __init__(self, *, cache_seconds: float = 1.0):
+        self.cache_seconds = max(0.0, float(cache_seconds))
+        self._cached_state: GPUState | None = None
+        self._cached_at: float = 0.0
+
     def snapshot(self) -> GPUState:
+        now = time.monotonic()
+        if self.cache_seconds > 0 and self._cached_state is not None and now - self._cached_at <= self.cache_seconds:
+            return self._cached_state
+        state = self._snapshot_uncached()
+        self._cached_state = state
+        self._cached_at = now
+        return state
+
+    def _snapshot_uncached(self) -> GPUState:
         if not shutil.which("nvidia-smi"):
             return GPUState(available=False, error="nvidia-smi not found")
         query = (
@@ -64,4 +79,3 @@ class GPUProbe:
 
 def json_safe_gpu_state(state: GPUState) -> str:
     return json.dumps(state.to_dict(), sort_keys=True)
-

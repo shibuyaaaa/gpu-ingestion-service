@@ -47,7 +47,7 @@ class ModelRuntimeBundle:
             return cls(
                 all_in_one=cloud_runtime,
                 htdemucs=cloud_runtime,
-                gpu_probe=GPUProbe(),
+                gpu_probe=GPUProbe(cache_seconds=settings.gpu_probe_cache_seconds),
                 gpu_lock=asyncio.Lock(),
                 settings=settings,
                 torch_runtime_status={"configured": False, "enabled": False, "reason": "remote_cloud_run_backend"},
@@ -74,7 +74,7 @@ class ModelRuntimeBundle:
                 stager=pinned_stager,
                 empty_cache_after_job=settings.cuda_empty_cache_after_job,
             ),
-            gpu_probe=GPUProbe(),
+            gpu_probe=GPUProbe(cache_seconds=settings.gpu_probe_cache_seconds),
             gpu_lock=asyncio.Lock(),
             settings=settings,
             torch_runtime_status={"configured": False},
