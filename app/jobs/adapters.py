@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -31,6 +32,7 @@ PROCESS_MODE_SEGMENT_CHORD = "segment_chord"
 PROCESS_MODE_SEGMENT_OTHER = "segment_other"
 _SOURCE_AUDIO_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _ANALYSIS_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+_SEGMENT_STEM_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _MAX_CACHE_LOCKS = 2048
 
 
@@ -495,11 +497,33 @@ class DissectAdapter(JobAdapter):
             stem_source = "inherited_segment_stems"
         else:
             if can_slice_full_stems:
-                started = time.perf_counter()
                 stems_to_extract = dict(_filter_stems(full_stem_paths, stem_group))
-                stems = await self._extract_stem_segments(stems_to_extract, stems_dir, segment)
-                timings["stem_segment_extract_seconds"] = round(time.perf_counter() - started, 6)
-                stem_source = "all_in_one_full_song_stems"
+                segment_cache_key = _segment_stem_cache_key(job.artifacts, segment)
+                started = time.perf_counter()
+                stems = await _restore_cached_segment_stems(
+                    cache_key=segment_cache_key,
+                    requested_stems=stems_to_extract.keys(),
+                    output_dir=stems_dir,
+                    context=context,
+                )
+                if stems is not None:
+                    timings["segment_stem_cache_hit"] = 1
+                    timings["segment_stem_cache_restore_seconds"] = round(time.perf_counter() - started, 6)
+                    timings["stem_segment_extract_seconds"] = 0.0
+                    stem_source = "segment_stem_cache"
+                else:
+                    timings["segment_stem_cache_hit"] = 0
+                    started = time.perf_counter()
+                    stems = await self._extract_stem_segments(stems_to_extract, stems_dir, segment)
+                    timings["stem_segment_extract_seconds"] = round(time.perf_counter() - started, 6)
+                    store_started = time.perf_counter()
+                    await _store_cached_segment_stems(
+                        cache_key=segment_cache_key,
+                        stems=stems,
+                        context=context,
+                    )
+                    timings["segment_stem_cache_store_seconds"] = round(time.perf_counter() - store_started, 6)
+                    stem_source = "all_in_one_full_song_stems"
             else:
                 if segment_path is None:
                     raise RuntimeError("segment audio path was not prepared for HTDemucs processing")
@@ -1143,6 +1167,21 @@ def _analysis_cache_key(artifacts: dict[str, Any]) -> str | None:
     return None
 
 
+def _segment_stem_cache_key(artifacts: dict[str, Any], segment: dict[str, Any]) -> str | None:
+    source_key = _analysis_cache_key(artifacts)
+    if not source_key:
+        return None
+    payload = {
+        "source": source_key,
+        "segment_id": str(segment.get("id") or ""),
+        "start": round(float(segment.get("start") or 0.0), 3),
+        "end": round(float(segment.get("end") or 0.0), 3),
+        "label": str(segment.get("label") or ""),
+    }
+    digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    return f"{_safe_job_part(source_key)}-{digest}"
+
+
 def _analysis_cache_lock(cache_key: str) -> asyncio.Lock:
     return _bounded_cache_lock(_ANALYSIS_CACHE_LOCKS, cache_key)
 
@@ -1263,8 +1302,123 @@ async def _prune_analysis_cache(cache_root: Path, *, max_entries: int, max_bytes
     await asyncio.to_thread(prune)
 
 
+async def _restore_cached_segment_stems(
+    *,
+    cache_key: str | None,
+    requested_stems: Any,
+    output_dir: Path,
+    context: JobContext,
+) -> dict[str, str] | None:
+    if not context.settings.segment_stem_cache_enabled or not cache_key:
+        return None
+    stem_names = [str(stem) for stem in requested_stems]
+    if not stem_names:
+        return {}
+    cache_dir = context.settings.work_dir / "segment-stem-cache" / _safe_job_part(cache_key)
+    lock = _segment_stem_cache_lock(cache_key)
+    async with lock:
+        if not all((cache_dir / f"{stem}.mp3").is_file() for stem in stem_names):
+            return None
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stems = {}
+        for stem in stem_names:
+            target = output_dir / f"{stem}.mp3"
+            _link_or_copy(cache_dir / f"{stem}.mp3", target)
+            stems[stem] = str(target)
+        metadata = cache_dir / "metadata.json"
+        if metadata.exists():
+            try:
+                os.utime(metadata, None)
+            except OSError:
+                pass
+        return stems
+
+
+async def _store_cached_segment_stems(
+    *,
+    cache_key: str | None,
+    stems: dict[str, str],
+    context: JobContext,
+) -> None:
+    if not context.settings.segment_stem_cache_enabled or not cache_key or not stems:
+        return
+    cache_root = context.settings.work_dir / "segment-stem-cache"
+    cache_dir = cache_root / _safe_job_part(cache_key)
+    lock = _segment_stem_cache_lock(cache_key)
+    async with lock:
+        await asyncio.to_thread(_store_cached_segment_stems_sync, cache_root, cache_dir, stems)
+        await _prune_directory_cache(
+            cache_root,
+            max_entries=context.settings.segment_stem_cache_max_entries,
+            max_bytes=context.settings.segment_stem_cache_max_bytes,
+        )
+
+
+def _store_cached_segment_stems_sync(cache_root: Path, cache_dir: Path, stems: dict[str, str]) -> None:
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for stem, path in stems.items():
+        source = Path(path)
+        if source.is_file():
+            _link_or_copy(source, cache_dir / f"{stem}.mp3")
+    (cache_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "written_at": datetime.now(timezone.utc).isoformat(),
+                "stems": sorted(stems),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+async def _prune_directory_cache(cache_root: Path, *, max_entries: int, max_bytes: int) -> None:
+    if max_entries <= 0 and max_bytes <= 0:
+        return
+
+    def prune() -> None:
+        entries = _directory_cache_entries(cache_root)
+        total_bytes = sum(size for _, size, _ in entries)
+        keep: list[tuple[float, int, Path]] = []
+        for item in entries:
+            if max_entries > 0 and len(keep) >= max_entries:
+                total_bytes -= item[1]
+                shutil.rmtree(item[2], ignore_errors=True)
+                continue
+            keep.append(item)
+        for _, size, stale in reversed(keep):
+            if max_bytes <= 0 or total_bytes <= max_bytes:
+                break
+            total_bytes -= size
+            shutil.rmtree(stale, ignore_errors=True)
+
+    await asyncio.to_thread(prune)
+
+
+def _directory_cache_entries(cache_root: Path) -> list[tuple[float, int, Path]]:
+    entries = []
+    paths = cache_root.iterdir() if cache_root.exists() else []
+    for path in paths:
+        if not path.is_dir() or path.name == ".tmp":
+            continue
+        metadata = path / "metadata.json"
+        try:
+            mtime = metadata.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        entries.append((mtime, _directory_size(path), path))
+    entries.sort(reverse=True, key=lambda item: item[0])
+    return entries
+
+
 def _source_audio_cache_lock(video_id: str) -> asyncio.Lock:
     return _bounded_cache_lock(_SOURCE_AUDIO_CACHE_LOCKS, video_id)
+
+
+def _segment_stem_cache_lock(cache_key: str) -> asyncio.Lock:
+    return _bounded_cache_lock(_SEGMENT_STEM_CACHE_LOCKS, cache_key)
 
 
 def _bounded_cache_lock(lock_map: dict[tuple[int, str], asyncio.Lock], cache_key: str) -> asyncio.Lock:
@@ -1292,6 +1446,7 @@ def cache_lock_status() -> dict[str, Any]:
     return {
         "source_audio_locks": len(_SOURCE_AUDIO_CACHE_LOCKS),
         "analysis_locks": len(_ANALYSIS_CACHE_LOCKS),
+        "segment_stem_locks": len(_SEGMENT_STEM_CACHE_LOCKS),
         "max_locks_per_map": _MAX_CACHE_LOCKS,
     }
 

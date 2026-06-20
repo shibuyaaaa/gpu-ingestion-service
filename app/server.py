@@ -278,6 +278,9 @@ async def _cache_status() -> dict[str, Any]:
         analysis_enabled=settings.analysis_cache_enabled,
         analysis_max_entries=settings.analysis_cache_max_entries,
         analysis_max_bytes=settings.analysis_cache_max_bytes,
+        segment_stem_enabled=settings.segment_stem_cache_enabled,
+        segment_stem_max_entries=settings.segment_stem_cache_max_entries,
+        segment_stem_max_bytes=settings.segment_stem_cache_max_bytes,
         lock_status=cache_lock_status(),
     )
 

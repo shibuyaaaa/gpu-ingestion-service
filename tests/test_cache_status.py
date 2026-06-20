@@ -27,6 +27,9 @@ def test_local_cache_status_counts_source_and_analysis_entries(tmp_path: Path):
         analysis_enabled=True,
         analysis_max_entries=4,
         analysis_max_bytes=2048,
+        segment_stem_enabled=True,
+        segment_stem_max_entries=1000,
+        segment_stem_max_bytes=4096,
         lock_status={"source_audio_locks": 1},
     )
 
@@ -37,7 +40,10 @@ def test_local_cache_status_counts_source_and_analysis_entries(tmp_path: Path):
     assert status["analysis"]["complete_entries"] == 1
     assert status["analysis"]["bytes"] >= 20
     assert status["analysis"]["max_bytes"] == 2048
-    assert status["total_bytes"] == status["source_audio"]["bytes"] + status["analysis"]["bytes"]
+    assert status["segment_stem"]["max_bytes"] == 4096
+    assert status["total_bytes"] == (
+        status["source_audio"]["bytes"] + status["analysis"]["bytes"] + status["segment_stem"]["bytes"]
+    )
     assert status["locks"] == {"source_audio_locks": 1}
 
 

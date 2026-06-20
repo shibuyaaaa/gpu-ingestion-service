@@ -26,6 +26,9 @@ services:
       ANALYSIS_CACHE_ENABLED: "true"
       ANALYSIS_CACHE_MAX_ENTRIES: "4"
       ANALYSIS_CACHE_MAX_BYTES: "2gb"
+      SEGMENT_STEM_CACHE_ENABLED: "true"
+      SEGMENT_STEM_CACHE_MAX_ENTRIES: "1000"
+      SEGMENT_STEM_CACHE_MAX_BYTES: "8gb"
     ports:
       - "8080:8080"
     volumes:

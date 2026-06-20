@@ -81,6 +81,10 @@ run with `DRY_RUN_MODE=false`.
   `ANALYSIS_CACHE_MAX_BYTES`: local all-in-one analysis/full-stem cache keyed by
   YouTube id. Default: enabled with `4` entries and `2gb` because each entry
   contains four full-song WAV stems.
+- `SEGMENT_STEM_CACHE_ENABLED`, `SEGMENT_STEM_CACHE_MAX_ENTRIES`,
+  `SEGMENT_STEM_CACHE_MAX_BYTES`: local per-segment MP3 stem cache keyed by
+  source and segment timing. Default: enabled with `1000` entries and `8gb` to
+  avoid repeated ffmpeg slicing for duplicate sources.
 - `MODEL_BACKEND`: `local`, `remote_gpu`, or `cloud_run_fallback`. Default: `local`.
 - `ALL_IN_ONE_GCP_URL`: Cloud Run all-in-one `/predict` service URL for remote GPU mode.
 - `ALL_IN_ONE_AUTH`: `none`, `api_key`, `google_id_token`, or `gcloud_identity_token`.

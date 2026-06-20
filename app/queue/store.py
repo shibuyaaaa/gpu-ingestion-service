@@ -940,6 +940,9 @@ class JobStore:
                         [
                             "htdemucs_segment_seconds",
                             "stem_segment_extract_seconds",
+                            "segment_stem_cache_hit",
+                            "segment_stem_cache_restore_seconds",
+                            "segment_stem_cache_store_seconds",
                             "source_segment_extract_seconds",
                             "upload_and_publish_seconds",
                             "gpu_sample_count",
@@ -1013,6 +1016,9 @@ class JobStore:
                     [
                         "htdemucs_segment_seconds",
                         "stem_segment_extract_seconds",
+                        "segment_stem_cache_hit",
+                        "segment_stem_cache_restore_seconds",
+                        "segment_stem_cache_store_seconds",
                         "source_segment_extract_seconds",
                         "upload_and_publish_seconds",
                         "gpu_sample_count",

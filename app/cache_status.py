@@ -11,6 +11,9 @@ def local_cache_status(
     analysis_enabled: bool,
     analysis_max_entries: int,
     analysis_max_bytes: int,
+    segment_stem_enabled: bool,
+    segment_stem_max_entries: int,
+    segment_stem_max_bytes: int,
     lock_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = _source_audio_cache_status(
@@ -25,11 +28,18 @@ def local_cache_status(
         max_entries=analysis_max_entries,
         max_bytes=analysis_max_bytes,
     )
+    segment_stem = _directory_cache_status(
+        work_dir / "segment-stem-cache",
+        enabled=segment_stem_enabled,
+        max_entries=segment_stem_max_entries,
+        max_bytes=segment_stem_max_bytes,
+    )
     return {
         "source_audio": source,
         "analysis": analysis,
-        "total_bytes": source["bytes"] + analysis["bytes"],
-        "total_mib": round((source["bytes"] + analysis["bytes"]) / (1024 * 1024), 3),
+        "segment_stem": segment_stem,
+        "total_bytes": source["bytes"] + analysis["bytes"] + segment_stem["bytes"],
+        "total_mib": round((source["bytes"] + analysis["bytes"] + segment_stem["bytes"]) / (1024 * 1024), 3),
         "locks": lock_status or {},
     }
 
@@ -58,6 +68,21 @@ def _analysis_cache_status(path: Path, *, enabled: bool, max_entries: int, max_b
         "path": str(path),
         "entries": len(entries),
         "complete_entries": complete_entries,
+        "max_entries": max_entries,
+        "max_bytes": max_bytes,
+        "max_mib": round(max_bytes / (1024 * 1024), 3),
+        "bytes": total_bytes,
+        "mib": round(total_bytes / (1024 * 1024), 3),
+    }
+
+
+def _directory_cache_status(path: Path, *, enabled: bool, max_entries: int, max_bytes: int) -> dict[str, Any]:
+    entries = [item for item in _safe_iterdir(path) if item.is_dir() and item.name != ".tmp"]
+    total_bytes = sum(_directory_size(item) for item in entries)
+    return {
+        "enabled": enabled,
+        "path": str(path),
+        "entries": len(entries),
         "max_entries": max_entries,
         "max_bytes": max_bytes,
         "max_mib": round(max_bytes / (1024 * 1024), 3),

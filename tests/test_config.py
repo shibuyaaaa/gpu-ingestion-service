@@ -15,6 +15,7 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
         "GPU_JOB_SAMPLE_INTERVAL_SECONDS",
         "SOURCE_AUDIO_CACHE_MAX_BYTES",
         "ANALYSIS_CACHE_MAX_BYTES",
+        "SEGMENT_STEM_CACHE_MAX_BYTES",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -28,11 +29,14 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
     assert settings.gpu_job_sample_interval_seconds == 0.5
     assert settings.source_audio_cache_max_bytes == 8 * 1024**3
     assert settings.analysis_cache_max_bytes == 2 * 1024**3
+    assert settings.segment_stem_cache_max_bytes == 8 * 1024**3
 
 
 def test_cache_byte_env_accepts_human_readable_units(monkeypatch):
     monkeypatch.setenv("SOURCE_AUDIO_CACHE_MAX_BYTES", "1.5gb")
     monkeypatch.setenv("ANALYSIS_CACHE_MAX_BYTES", "512mb")
+    monkeypatch.setenv("SEGMENT_STEM_CACHE_MAX_BYTES", "2g")
 
     assert _bytes_env("SOURCE_AUDIO_CACHE_MAX_BYTES", 0) == int(1.5 * 1024**3)
     assert _bytes_env("ANALYSIS_CACHE_MAX_BYTES", 0) == 512 * 1024**2
+    assert _bytes_env("SEGMENT_STEM_CACHE_MAX_BYTES", 0) == 2 * 1024**3
