@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from app.config import Settings
 from app.jobs import build_default_registry
 from app.jobs.adapters import BulkDissectAdapter, _should_skip_segment_processing
+from app.jobs.base import StageResult
 from app.jobs.context import JobContext
 from app.library_membership import LibraryMembershipChecker
 from app.library_writer import LibraryWriter
@@ -69,6 +70,65 @@ def test_worker_uses_short_retry_delay_for_download_failures():
         assert manager._retry_delay_seconds(job) == 4
         assert manager._retry_delay_seconds(replace(job, stage=JobStage.ANALYZE)) == 31
         assert manager.state()["scheduling"]["retry_delay_seconds"] == {"download": 4, "default": 31}
+
+
+async def test_worker_reconciles_parent_only_when_fanout_maybe_complete():
+    class FakeAdapter:
+        def __init__(self, *, fanout_maybe_complete: bool):
+            self.fanout_maybe_complete = fanout_maybe_complete
+
+        async def run_stage(self, job, context):
+            return StageResult(
+                next_stage=None,
+                artifacts={"fanout_maybe_complete": self.fanout_maybe_complete},
+            )
+
+    class FakeRegistry:
+        def __init__(self, adapter):
+            self.adapter = adapter
+
+        def get(self, job_type):
+            return self.adapter
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        settings = Settings(
+            queue_db_path=root / "queue.sqlite3",
+            work_dir=root / "work",
+            dry_run_mode=True,
+            start_workers=False,
+        )
+        store = JobStore(settings.queue_db_path, max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        child = store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-1:other",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": parent.id},
+            artifacts={"process_mode": "segment_other", "segment_id": "seg-1"},
+            priority=100,
+        )
+        claimed = store.claim_next([JobStage.PROCESS], "process-worker")
+        calls = []
+
+        def fake_reconcile(root_job_id):
+            calls.append(root_job_id)
+            return None
+
+        store.reconcile_failed_fanout_parent = fake_reconcile
+        context = SimpleNamespace(settings=settings, store=store)
+        state = SimpleNamespace(active_job_ids=[], processed=0, failures=0, last_error=None)
+
+        manager = WorkerManager(context=context, registry=FakeRegistry(FakeAdapter(fanout_maybe_complete=False)))
+        await manager._process_job_stage(claimed, state)
+        assert calls == []
+
+        store.retry(child.id)
+        claimed = store.claim_next([JobStage.PROCESS], "process-worker")
+        manager = WorkerManager(context=context, registry=FakeRegistry(FakeAdapter(fanout_maybe_complete=True)))
+        await manager._process_job_stage(claimed, state)
+
+        assert calls == ["root"]
 
 
 async def test_worker_completes_local_dry_run_job():

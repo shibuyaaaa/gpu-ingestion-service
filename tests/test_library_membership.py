@@ -10,7 +10,7 @@ from app.library_membership import LibraryLookupResult, LibraryMembershipChecker
 from app.library_writer import LibraryPublishResult, LibraryWriter
 from app.legacy.db import DBClient
 from app.legacy.utils import GCSClient
-from app.queue import JobStage, JobStore
+from app.queue import JobStage, JobStore, JobType
 
 
 def _row(song_id: str, title: str, artists: list[str]) -> dict:
@@ -520,3 +520,70 @@ async def test_chord_job_slices_only_chord_and_child_uses_full_stems(monkeypatch
     assert other_job is not None
     assert other_job.artifacts["stem_paths"] == {}
     assert set(other_job.artifacts["full_stem_paths"]) == {"other", "vocals", "drums"}
+
+
+async def test_last_other_fanout_child_signals_parent_reconcile(monkeypatch, tmp_path):
+    mark_complete_calls = 0
+
+    class FakeGCS:
+        async def upload(self, local_path, gcs_path, *, content_type):
+            return f"https://cdn.test/{Path(gcs_path).name}"
+
+    class FakeWriter:
+        async def publish_segment(self, *, job, segment, segment_result, status):
+            return LibraryPublishResult(enabled=True, song_id="song-1", status=status)
+
+        async def mark_complete(self, *, job):
+            nonlocal mark_complete_calls
+            mark_complete_calls += 1
+            return LibraryPublishResult(enabled=True, song_id="song-1", status="complete")
+
+    for stem in ("vocals", "drums", "bass"):
+        (tmp_path / f"{stem}.mp3").write_bytes(b"mp3")
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+    )
+    store = JobStore(settings.queue_db_path)
+    root, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+    child = store.enqueue_process_child(
+        parent_job=root,
+        child_id="root:bulk:seg-1:other",
+        job_type=JobType.BULK_DISSECT,
+        payload={"source": "song", "root_job_id": root.id},
+        artifacts={
+            "work_dir": str(tmp_path / "work" / "jobs" / root.id),
+            "audio_path": str(tmp_path / "source.wav"),
+            "process_mode": "segment_other",
+            "process_group": "bulk",
+            "root_job_id": root.id,
+            "segment_id": "seg-1",
+            "segment": {"id": "seg-1", "start": 0.0, "end": 8.0, "label": "chorus"},
+            "stem_paths": {
+                "vocals": str(tmp_path / "vocals.mp3"),
+                "drums": str(tmp_path / "drums.mp3"),
+                "bass": str(tmp_path / "bass.mp3"),
+            },
+            "requires_gpu": False,
+        },
+        priority=100,
+    )
+    store.claim_next([JobStage.PROCESS], "process-worker")
+    child = store.get(child.id)
+    context = JobContext(
+        settings=settings,
+        store=store,
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=FakeWriter(),
+    )
+
+    result = await BulkDissectAdapter()._process_fanout_job(child, context)
+
+    assert result.artifacts["fanout_maybe_complete"] is True
+    assert result.artifacts["library_complete"]["status"] == "complete"
+    assert mark_complete_calls == 1

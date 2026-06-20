@@ -424,10 +424,12 @@ class DissectAdapter(JobAdapter):
             )
             other_job = self._enqueue_other_stems_job(job, context, segment, result)
             library_complete = None
+            fanout_maybe_complete = False
             if other_job is None and not context.settings.dry_run_mode:
                 root_job_id = str(job.artifacts.get("root_job_id") or job.payload.get("root_job_id") or job.id)
                 sibling_summary = context.store.child_summary(root_job_id, exclude_job_id=job.id)
-                if sibling_summary["active"] == 0 and sibling_summary["failed"] == 0:
+                fanout_maybe_complete = sibling_summary["active"] == 0 and sibling_summary["failed"] == 0
+                if fanout_maybe_complete:
                     library_complete = (await context.library_writer.mark_complete(job=job)).to_dict()
                     _ensure_library_publish_ok(library_complete)
             final_outputs = {
@@ -448,6 +450,7 @@ class DissectAdapter(JobAdapter):
                     "segment_result": result,
                     "other_stems_job_id": other_job.id if other_job else None,
                     "library_complete": library_complete,
+                    "fanout_maybe_complete": fanout_maybe_complete,
                     "final_outputs": final_outputs,
                 },
             )
@@ -462,6 +465,7 @@ class DissectAdapter(JobAdapter):
             )
             library_publish = None
             library_complete = None
+            fanout_maybe_complete = False
             if not context.settings.dry_run_mode:
                 library_publish = (
                     await context.library_writer.publish_segment(
@@ -475,7 +479,8 @@ class DissectAdapter(JobAdapter):
                 result["library_publish"] = library_publish
                 root_job_id = str(job.artifacts.get("root_job_id") or job.payload.get("root_job_id") or job.id)
                 sibling_summary = context.store.child_summary(root_job_id, exclude_job_id=job.id)
-                if sibling_summary["active"] == 0 and sibling_summary["failed"] == 0:
+                fanout_maybe_complete = sibling_summary["active"] == 0 and sibling_summary["failed"] == 0
+                if fanout_maybe_complete:
                     library_complete = (await context.library_writer.mark_complete(job=job)).to_dict()
                     _ensure_library_publish_ok(library_complete)
 
@@ -496,6 +501,7 @@ class DissectAdapter(JobAdapter):
                     "segment_result": result,
                     "library_publish": library_publish,
                     "library_complete": library_complete,
+                    "fanout_maybe_complete": fanout_maybe_complete,
                     "final_outputs": final_outputs,
                 },
             )
