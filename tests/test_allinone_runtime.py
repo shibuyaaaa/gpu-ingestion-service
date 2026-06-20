@@ -216,6 +216,80 @@ def test_memory_bounded_demix_uses_resident_backend_by_default(tmp_path, monkeyp
     assert calls["demucs_model"] == "htdemucs_ft"
 
 
+def test_preload_resident_demucs_uses_static_model_dir(tmp_path, monkeypatch):
+    calls = {}
+    static_models = tmp_path / "static_models"
+
+    def fake_resident_model(model_name, device, static_models_dir):
+        calls["model_name"] = model_name
+        calls["device"] = device
+        calls["static_models_dir"] = static_models_dir
+        return object()
+
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_MODEL", "htdemucs_ft")
+    monkeypatch.setenv("ALL_IN_ONE_STATIC_MODELS_DIR", str(static_models))
+    monkeypatch.setattr(allinone_module, "_resident_demucs_model", fake_resident_model)
+
+    runtime = AllInOneRuntime(model_name="harmonix-fold0", device="cuda:0")
+    runtime._preload_resident_demucs_sync()
+
+    assert calls == {
+        "model_name": "htdemucs_ft",
+        "device": "cuda:0",
+        "static_models_dir": static_models,
+    }
+    assert runtime.status()["demucs"]["preloaded"] is True
+
+
+def test_load_preloads_resident_demucs_when_enabled(monkeypatch):
+    class FakeAllInOneModule:
+        def analyze(self):
+            return None
+
+    calls = {"preload": 0}
+
+    def fake_preload(self):
+        calls["preload"] += 1
+        self._demucs_preloaded = True
+
+    monkeypatch.setitem(allinone_module.sys.modules, "allin1", FakeAllInOneModule())
+    monkeypatch.delenv("ALL_IN_ONE_DEMUCS_BACKEND", raising=False)
+    monkeypatch.delenv("ALL_IN_ONE_DEMUCS_PRELOAD", raising=False)
+    monkeypatch.setattr(AllInOneRuntime, "_preload_resident_demucs_sync", fake_preload)
+
+    runtime = AllInOneRuntime(model_name="harmonix-fold0", device="cuda:0")
+    runtime._load_sync()
+
+    assert calls["preload"] == 1
+    assert runtime.loaded is True
+    assert runtime.status()["demucs"]["preload_enabled"] is True
+    assert runtime.status()["demucs"]["preloaded"] is True
+    assert runtime.status()["last_timings"]["demucs_preload_seconds"] >= 0
+
+
+def test_load_can_skip_resident_demucs_preload(monkeypatch):
+    class FakeAllInOneModule:
+        def analyze(self):
+            return None
+
+    calls = {"preload": 0}
+
+    def fake_preload(self):
+        calls["preload"] += 1
+
+    monkeypatch.setitem(allinone_module.sys.modules, "allin1", FakeAllInOneModule())
+    monkeypatch.setenv("ALL_IN_ONE_DEMUCS_PRELOAD", "false")
+    monkeypatch.setattr(AllInOneRuntime, "_preload_resident_demucs_sync", fake_preload)
+
+    runtime = AllInOneRuntime(model_name="harmonix-fold0", device="cuda:0")
+    runtime._load_sync()
+
+    assert calls["preload"] == 0
+    assert runtime.loaded is True
+    assert runtime.status()["demucs"]["preload_enabled"] is False
+    assert runtime.status()["demucs"]["preloaded"] is False
+
+
 def test_save_demucs_sources_saves_all_sources(tmp_path):
     calls = []
 

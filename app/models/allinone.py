@@ -31,6 +31,7 @@ class AllInOneRuntime:
         self.loaded = False
         self._allin1: Any = None
         self._last_timings: dict[str, Any] = {}
+        self._demucs_preloaded = False
 
     async def load(self) -> None:
         if self.loaded:
@@ -45,7 +46,19 @@ class AllInOneRuntime:
 
         self._allin1 = allin1
         self._patch_allin1_demix()
+        if _bool_env("ALL_IN_ONE_DEMUCS_PRELOAD", True) and _demucs_backend() == "resident":
+            started = time.perf_counter()
+            self._preload_resident_demucs_sync()
+            self._last_timings["demucs_preload_seconds"] = _elapsed(started)
         self.loaded = True
+
+    def _preload_resident_demucs_sync(self) -> None:
+        _resident_demucs_model(
+            _demucs_model_name(),
+            self.device,
+            _all_in_one_static_models_dir(),
+        )
+        self._demucs_preloaded = True
 
     async def analyze(self, audio_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
         await self.load()
@@ -229,6 +242,8 @@ class AllInOneRuntime:
             "demucs": {
                 "model": _demucs_model_name(),
                 "backend": _demucs_backend(),
+                "preload_enabled": _bool_env("ALL_IN_ONE_DEMUCS_PRELOAD", True),
+                "preloaded": self._demucs_preloaded,
                 "segment": _demucs_segment_status(),
                 "jobs": os.getenv("ALL_IN_ONE_DEMUCS_JOBS", "0"),
                 "save_workers": _demucs_save_workers(),
@@ -402,6 +417,10 @@ def _resident_demucs_model(model_name: str, device: Any, static_models_dir: Path
             torch.cuda.synchronize(torch.device(device))
         _DEMUCS_MODEL_CACHE[cache_key] = model
         return model
+
+
+def _all_in_one_static_models_dir() -> Path:
+    return Path(os.getenv("ALL_IN_ONE_STATIC_MODELS_DIR", "/opt/all-in-one-audio/static_models"))
 
 
 _DEMUCS_STEMS = ("bass", "drums", "other", "vocals")
