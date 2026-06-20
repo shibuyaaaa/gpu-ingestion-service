@@ -87,6 +87,7 @@ class JobStore:
                     WHERE source_message_id IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_jobs_claim
                     ON jobs(status, stage, available_at, priority, created_at);
+                DROP INDEX IF EXISTS idx_jobs_payload_root;
                 CREATE INDEX IF NOT EXISTS idx_jobs_payload_root_status
                     ON jobs(json_extract(payload_json, '$.root_job_id'), status, id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_payload_parent
