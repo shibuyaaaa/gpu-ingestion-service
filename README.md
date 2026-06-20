@@ -73,6 +73,9 @@ run with `DRY_RUN_MODE=false`.
 - `JOB_LEASE_TIMEOUT_SECONDS`: startup recovery timeout for crashed workers.
 - `WORK_DIR_CLEANUP_*`: terminal job workdir cleanup. The service removes only
   workdirs no non-terminal job still references.
+- `SOURCE_AUDIO_CACHE_ENABLED`, `SOURCE_AUDIO_CACHE_MAX_ENTRIES`: local normalized
+  YouTube WAV cache. Default: enabled with `100` entries, with per-video in-flight
+  locking so duplicate requests reuse the same source download/conversion.
 - `MODEL_BACKEND`: `local`, `remote_gpu`, or `cloud_run_fallback`. Default: `local`.
 - `ALL_IN_ONE_GCP_URL`: Cloud Run all-in-one `/predict` service URL for remote GPU mode.
 - `ALL_IN_ONE_AUTH`: `none`, `api_key`, `google_id_token`, or `gcloud_identity_token`.

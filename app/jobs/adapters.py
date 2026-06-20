@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import shutil
 import time
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ PROCESS_PRIORITY_BULK_OTHER = 100
 
 PROCESS_MODE_SEGMENT_CHORD = "segment_chord"
 PROCESS_MODE_SEGMENT_OTHER = "segment_other"
+_SOURCE_AUDIO_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 
 
 class DissectAdapter(JobAdapter):
@@ -39,6 +41,7 @@ class DissectAdapter(JobAdapter):
         source = self._source_from_payload(job.payload)
         work_dir = context.job_work_dir(job)
         work_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = work_dir / "input.wav"
 
         if context.settings.dry_run_mode:
             started = time.perf_counter()
@@ -106,12 +109,19 @@ class DissectAdapter(JobAdapter):
                 started = time.perf_counter()
                 resolved = await resolve_youtube_match(resolved)
                 timings["youtube_match_seconds"] = round(time.perf_counter() - started, 6)
-            started = time.perf_counter()
-            audio_path = await download_youtube_audio(resolved["youtube_url"], work_dir)
-            timings["youtube_download_seconds"] = round(time.perf_counter() - started, 6)
-            source_path = Path(audio_path)
+            if await self._restore_or_create_cached_wav(
+                youtube_url=resolved["youtube_url"],
+                wav_path=wav_path,
+                context=context,
+                timings=timings,
+            ):
+                source_path = wav_path
+            else:
+                started = time.perf_counter()
+                audio_path = await download_youtube_audio(resolved["youtube_url"], work_dir)
+                timings["youtube_download_seconds"] = round(time.perf_counter() - started, 6)
+                source_path = Path(audio_path)
 
-        wav_path = work_dir / "input.wav"
         if source_path.suffix.lower() in {".wav", ".wave"}:
             if source_path != wav_path:
                 started = time.perf_counter()
@@ -141,6 +151,64 @@ class DissectAdapter(JobAdapter):
                 "skip_library_write": _truthy_payload_flag(job, "skip_library_write"),
             },
         )
+
+    async def _restore_or_create_cached_wav(
+        self,
+        *,
+        youtube_url: str,
+        wav_path: Path,
+        context: JobContext,
+        timings: dict[str, float],
+    ) -> bool:
+        if not context.settings.source_audio_cache_enabled:
+            return False
+        video_id = extract_youtube_video_id(youtube_url)
+        if not video_id:
+            return False
+
+        cache_dir = context.settings.work_dir / "source-cache"
+        cache_path = cache_dir / f"{_safe_job_part(video_id)}.wav"
+        lock = _source_audio_cache_lock(video_id)
+        wait_started = time.perf_counter()
+        async with lock:
+            timings["source_audio_cache_wait_seconds"] = round(time.perf_counter() - wait_started, 6)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            if cache_path.is_file():
+                started = time.perf_counter()
+                shutil.copyfile(cache_path, wav_path)
+                timings["source_audio_cache_copy_seconds"] = round(time.perf_counter() - started, 6)
+                timings["youtube_download_seconds"] = 0.0
+                timings["wav_copy_seconds"] = 0.0
+                return True
+
+            tmp_dir = cache_dir / ".tmp" / _safe_job_part(video_id)
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                started = time.perf_counter()
+                audio_path = Path(await download_youtube_audio(youtube_url, tmp_dir))
+                timings["youtube_download_seconds"] = round(time.perf_counter() - started, 6)
+
+                tmp_wav = tmp_dir / "cached.wav"
+                if audio_path.suffix.lower() in {".wav", ".wave"}:
+                    started = time.perf_counter()
+                    shutil.copyfile(audio_path, tmp_wav)
+                    timings["source_audio_cache_build_copy_seconds"] = round(time.perf_counter() - started, 6)
+                else:
+                    started = time.perf_counter()
+                    await AudioOps.convert_to_wav(audio_path, tmp_wav)
+                    timings["source_audio_cache_build_convert_seconds"] = round(time.perf_counter() - started, 6)
+
+                started = time.perf_counter()
+                os.replace(tmp_wav, cache_path)
+                shutil.copyfile(cache_path, wav_path)
+                timings["source_audio_cache_store_seconds"] = round(time.perf_counter() - started, 6)
+                timings["wav_copy_seconds"] = 0.0
+                await _prune_source_audio_cache(cache_dir, context.settings.source_audio_cache_max_entries)
+                return True
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
     async def analyze(self, job: JobRecord, context: JobContext) -> StageResult:
         audio_path = job.artifacts["audio_path"]
@@ -960,6 +1028,34 @@ def _truthy_payload_flag(job: JobRecord, key: str) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _source_audio_cache_lock(video_id: str) -> asyncio.Lock:
+    key = (id(asyncio.get_running_loop()), video_id)
+    lock = _SOURCE_AUDIO_CACHE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SOURCE_AUDIO_CACHE_LOCKS[key] = lock
+    return lock
+
+
+async def _prune_source_audio_cache(cache_dir: Path, max_entries: int) -> None:
+    if max_entries <= 0:
+        return
+
+    def prune() -> None:
+        files = sorted(
+            (path for path in cache_dir.glob("*.wav") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in files[max_entries:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+    await asyncio.to_thread(prune)
 
 
 def _minimal_youtube_resolved(source: str) -> dict[str, Any]:

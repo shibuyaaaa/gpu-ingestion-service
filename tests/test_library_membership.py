@@ -406,6 +406,84 @@ async def test_skip_library_precheck_direct_youtube_source_skips_metadata_probe(
         assert Path(result.artifacts["audio_path"]).exists()
 
 
+async def test_direct_youtube_download_reuses_source_audio_cache(monkeypatch):
+    calls = {"downloads": 0}
+
+    async def forbidden_resolve_metadata(source: str):
+        raise AssertionError("direct YouTube skip path should not fetch metadata")
+
+    async def forbidden_youtube_match(resolved: dict):
+        raise AssertionError("direct YouTube skip path should not search YouTube")
+
+    async def fake_download(youtube_url: str, output_dir: str | Path):
+        calls["downloads"] += 1
+        target = Path(output_dir) / "source.wav"
+        target.write_bytes(b"cached-audio")
+        return str(target)
+
+    class ForbiddenLibrary:
+        async def lookup(self, metadata):
+            raise AssertionError("library lookup should be skipped")
+
+    monkeypatch.setattr("app.jobs.adapters.resolve_source_metadata", forbidden_resolve_metadata)
+    monkeypatch.setattr("app.jobs.adapters.resolve_youtube_match", forbidden_youtube_match)
+    monkeypatch.setattr("app.jobs.adapters.download_youtube_audio", fake_download)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = Settings(
+            queue_db_path=Path(tmp) / "queue.sqlite3",
+            work_dir=Path(tmp) / "work",
+            dry_run_mode=False,
+            source_audio_cache_enabled=True,
+        )
+        store = JobStore(settings.queue_db_path)
+        context = JobContext(
+            settings=settings,
+            store=store,
+            models=None,
+            gcs=GCSClient(
+                project_id=settings.gcp_project_id,
+                bucket_name=settings.gcp_bucket_name,
+                cdn_base_url=settings.cdn_base_url,
+            ),
+            db=DBClient(database_url=""),
+            library=ForbiddenLibrary(),
+            library_writer=LibraryWriter(
+                db=DBClient(database_url=""),
+                settings=settings,
+                membership=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+            ),
+        )
+        first, _ = store.enqueue(
+            {
+                "job_id": "cache-first",
+                "job_type": "bulk_dissect",
+                "source": "https://youtu.be/dQw4w9WgXcQ",
+                "skip_library_precheck": True,
+                "skip_library_write": True,
+            }
+        )
+        second, _ = store.enqueue(
+            {
+                "job_id": "cache-second",
+                "job_type": "bulk_dissect",
+                "source": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "skip_library_precheck": True,
+                "skip_library_write": True,
+            }
+        )
+
+        first_result = await BulkDissectAdapter().download(first, context)
+        second_result = await BulkDissectAdapter().download(second, context)
+
+        assert calls["downloads"] == 1
+        assert Path(first_result.artifacts["audio_path"]).read_bytes() == b"cached-audio"
+        assert Path(second_result.artifacts["audio_path"]).read_bytes() == b"cached-audio"
+        assert first_result.artifacts["download_timings"]["youtube_download_seconds"] >= 0
+        assert second_result.artifacts["download_timings"]["youtube_download_seconds"] == 0.0
+        assert second_result.artifacts["download_timings"]["source_audio_cache_copy_seconds"] >= 0
+
+
 async def test_missing_library_song_continues_download_stage(monkeypatch):
     async def fake_resolve_metadata(source: str):
         return {
