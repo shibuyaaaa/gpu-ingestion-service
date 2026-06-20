@@ -155,7 +155,7 @@ class DissectAdapter(JobAdapter):
         chorus_segment_id = str(chorus_segment.get("id") or "")
         skipped = {str(segment_id) for segment_id in artifacts.get("skip_segment_ids", [])}
         root_job_id = str(job.payload.get("root_job_id") or job.id)
-        children = []
+        child_specs = []
 
         for segment in segments:
             segment_id = str(segment["id"])
@@ -166,41 +166,47 @@ class DissectAdapter(JobAdapter):
             process_group = "quick" if is_quick_chorus else "bulk"
             priority = PROCESS_PRIORITY_QUICK_CHORD if is_quick_chorus else PROCESS_PRIORITY_BULK_CHORD
             child_id = f"{root_job_id}:{process_group}:{_safe_job_part(segment_id)}:chord"
-            child = context.store.enqueue_process_child(
-                parent_job=job,
-                child_id=child_id,
-                job_type=child_job_type,
-                priority=priority,
-                payload={
-                    "source": job.artifacts.get("source") or job.payload.get("source"),
-                    "root_job_id": root_job_id,
-                    "process_mode": PROCESS_MODE_SEGMENT_CHORD,
-                    "process_group": process_group,
-                    "segment_id": segment_id,
-                },
-                artifacts={
-                    **self._base_process_artifacts(job, artifacts),
-                    "process_mode": PROCESS_MODE_SEGMENT_CHORD,
-                    "process_group": process_group,
-                    "root_job_id": root_job_id,
-                    "parent_job_id": job.id,
-                    "segment_id": segment_id,
-                    "segment": segment,
-                    "requires_gpu": not bool(artifacts.get("full_stem_paths")),
-                    "other_stems_priority": (
-                        PROCESS_PRIORITY_QUICK_OTHER if is_quick_chorus else PROCESS_PRIORITY_BULK_OTHER
-                    ),
-                },
-            )
-            children.append(
+            child_specs.append(
                 {
-                    "job_id": child.id,
+                    "child_id": child_id,
+                    "job_type": child_job_type,
+                    "priority": priority,
                     "segment_id": segment_id,
                     "process_group": process_group,
-                    "process_mode": PROCESS_MODE_SEGMENT_CHORD,
-                    "priority": child.priority,
+                    "payload": {
+                        "source": job.artifacts.get("source") or job.payload.get("source"),
+                        "root_job_id": root_job_id,
+                        "process_mode": PROCESS_MODE_SEGMENT_CHORD,
+                        "process_group": process_group,
+                        "segment_id": segment_id,
+                    },
+                    "artifacts": {
+                        **self._base_process_artifacts(job, artifacts),
+                        "process_mode": PROCESS_MODE_SEGMENT_CHORD,
+                        "process_group": process_group,
+                        "root_job_id": root_job_id,
+                        "parent_job_id": job.id,
+                        "segment_id": segment_id,
+                        "segment": segment,
+                        "requires_gpu": not bool(artifacts.get("full_stem_paths")),
+                        "other_stems_priority": (
+                            PROCESS_PRIORITY_QUICK_OTHER if is_quick_chorus else PROCESS_PRIORITY_BULK_OTHER
+                        ),
+                    },
                 }
             )
+
+        enqueued_children = context.store.enqueue_process_children(parent_job=job, children=child_specs)
+        children = [
+            {
+                "job_id": child.id,
+                "segment_id": str(spec["segment_id"]),
+                "process_group": str(spec["process_group"]),
+                "process_mode": PROCESS_MODE_SEGMENT_CHORD,
+                "priority": child.priority,
+            }
+            for spec, child in zip(child_specs, enqueued_children, strict=True)
+        ]
 
         return {
             "root_job_id": root_job_id,

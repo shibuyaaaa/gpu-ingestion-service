@@ -175,6 +175,94 @@ def test_process_claim_order_prioritizes_chords_before_other_stems():
         assert [job.id for job in claimed] == ["quick-chord", "bulk-chord", "quick-other", "bulk-other"]
 
 
+def test_enqueue_process_children_inserts_batch_and_events():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+
+        children = store.enqueue_process_children(
+            parent_job=parent,
+            children=[
+                {
+                    "child_id": "root:bulk:seg-0:chord",
+                    "job_type": JobType.BULK_DISSECT,
+                    "payload": {"source": "song", "root_job_id": "root"},
+                    "artifacts": {"process_mode": "segment_chord", "segment_id": "seg-0", "requires_gpu": False},
+                    "priority": PROCESS_PRIORITY_BULK_CHORD,
+                },
+                {
+                    "child_id": "root:bulk:seg-1:chord",
+                    "job_type": JobType.BULK_DISSECT,
+                    "payload": {"source": "song", "root_job_id": "root"},
+                    "artifacts": {"process_mode": "segment_chord", "segment_id": "seg-1", "requires_gpu": False},
+                    "priority": PROCESS_PRIORITY_BULK_CHORD,
+                },
+            ],
+        )
+
+        assert [child.id for child in children] == ["root:bulk:seg-0:chord", "root:bulk:seg-1:chord"]
+        assert all(child.stage == JobStage.PROCESS for child in children)
+        assert store.child_summary("root") == {"total": 2, "active": 2, "completed": 0, "failed": 0}
+        parent_events = store.recent_events("root", limit=10)
+        child_events = store.recent_events("root:bulk:seg-0:chord", limit=10)
+        assert sum(event["event_type"] == "process_child_enqueued" for event in parent_events) == 2
+        assert child_events[0]["event_type"] == "enqueued"
+        assert child_events[0]["data"]["created"] is True
+
+
+def test_enqueue_process_children_is_idempotent_for_existing_child_ids():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        child_spec = {
+            "child_id": "root:bulk:seg-0:chord",
+            "job_type": JobType.BULK_DISSECT,
+            "payload": {"source": "song", "root_job_id": "root"},
+            "artifacts": {"process_mode": "segment_chord", "segment_id": "seg-0", "requires_gpu": False},
+            "priority": PROCESS_PRIORITY_BULK_CHORD,
+        }
+
+        first = store.enqueue_process_children(parent_job=parent, children=[child_spec])
+        second = store.enqueue_process_children(parent_job=parent, children=[child_spec])
+
+        assert first[0].id == second[0].id == "root:bulk:seg-0:chord"
+        assert store.stats()["active_depth"] == 2
+        child_events = store.recent_events("root:bulk:seg-0:chord", limit=10)
+        assert [event["data"]["created"] for event in child_events if event["event_type"] == "enqueued"] == [
+            False,
+            True,
+        ]
+
+
+def test_enqueue_process_children_checks_queue_depth_once_for_new_batch():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=2)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+
+        with pytest.raises(QueueFull):
+            store.enqueue_process_children(
+                parent_job=parent,
+                children=[
+                    {
+                        "child_id": "root:bulk:seg-0:chord",
+                        "job_type": JobType.BULK_DISSECT,
+                        "payload": {"source": "song", "root_job_id": "root"},
+                        "artifacts": {"process_mode": "segment_chord", "segment_id": "seg-0"},
+                        "priority": PROCESS_PRIORITY_BULK_CHORD,
+                    },
+                    {
+                        "child_id": "root:bulk:seg-1:chord",
+                        "job_type": JobType.BULK_DISSECT,
+                        "payload": {"source": "song", "root_job_id": "root"},
+                        "artifacts": {"process_mode": "segment_chord", "segment_id": "seg-1"},
+                        "priority": PROCESS_PRIORITY_BULK_CHORD,
+                    },
+                ],
+            )
+
+        assert store.child_summary("root") == {"total": 0, "active": 0, "completed": 0, "failed": 0}
+
+
 def test_quick_process_job_preempts_bulk_process_backlog_after_current_claim():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=20)

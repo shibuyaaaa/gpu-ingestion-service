@@ -234,6 +234,116 @@ class JobStore:
         )
         return job
 
+    def enqueue_process_children(
+        self,
+        *,
+        parent_job: JobRecord,
+        children: list[dict[str, Any]],
+    ) -> list[JobRecord]:
+        if not children:
+            return []
+        now = time.time()
+        specs = []
+        for child in children:
+            job_type = JobType(str(child["job_type"]))
+            child_id = str(child["child_id"])
+            payload = dict(child.get("payload") or {})
+            child_payload = {
+                **payload,
+                "job_id": child_id,
+                "job_type": job_type.value,
+                "parent_job_id": parent_job.id,
+                "root_job_id": payload.get("root_job_id") or parent_job.payload.get("root_job_id") or parent_job.id,
+            }
+            priority = int(child["priority"])
+            artifacts = dict(child.get("artifacts") or {})
+            specs.append(
+                {
+                    "child_id": child_id,
+                    "job_type": job_type,
+                    "payload": child_payload,
+                    "artifacts": artifacts,
+                    "priority": priority,
+                }
+            )
+
+        job_ids = [spec["child_id"] for spec in specs]
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                placeholders = ",".join("?" for _ in job_ids)
+                existing_rows = conn.execute(
+                    f"SELECT id FROM jobs WHERE id IN ({placeholders})",
+                    tuple(job_ids),
+                ).fetchall()
+                existing_ids = {row["id"] for row in existing_rows}
+                new_specs = [spec for spec in specs if spec["child_id"] not in existing_ids]
+                current_depth = conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE status NOT IN (?, ?)",
+                    (JobStatus.COMPLETED.value, JobStatus.FAILED.value),
+                ).fetchone()[0]
+                if current_depth + len(new_specs) > self.max_depth:
+                    raise QueueFull(f"queue depth {current_depth} + {len(new_specs)} new jobs > max {self.max_depth}")
+
+                for spec in new_specs:
+                    conn.execute(
+                        """
+                        INSERT INTO jobs (
+                            id, source_message_id, job_type, stage, status, payload_json,
+                            artifacts_json, attempts, max_attempts, priority, created_at,
+                            updated_at, available_at
+                        )
+                        VALUES (?, NULL, ?, ?, ?, ?, ?, 0, 3, ?, ?, ?, ?)
+                        """,
+                        (
+                            spec["child_id"],
+                            spec["job_type"].value,
+                            JobStage.PROCESS.value,
+                            JobStatus.QUEUED.value,
+                            _json_dumps(spec["payload"]),
+                            _json_dumps(spec["artifacts"]),
+                            spec["priority"],
+                            now,
+                            now,
+                            now,
+                        ),
+                    )
+
+                for spec in specs:
+                    created = spec["child_id"] not in existing_ids
+                    _add_event_conn(
+                        conn,
+                        spec["child_id"],
+                        JobEventType.ENQUEUED,
+                        created_at=now,
+                        data={
+                            "job_type": spec["job_type"].value,
+                            "created": created,
+                            "priority": spec["priority"],
+                        },
+                    )
+                    _add_event_conn(
+                        conn,
+                        parent_job.id,
+                        JobEventType.PROCESS_CHILD_ENQUEUED,
+                        created_at=now,
+                        data={
+                            "child_job_id": spec["child_id"],
+                            "created": created,
+                            "job_type": spec["job_type"].value,
+                            "priority": spec["priority"],
+                            "process_mode": spec["artifacts"].get("process_mode"),
+                            "segment_id": spec["artifacts"].get("segment_id"),
+                        },
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+        records = self.get_many(job_ids)
+        return [records[job_id] for job_id in job_ids if job_id in records]
+
     def get(self, job_id: str) -> JobRecord | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -740,13 +850,7 @@ class JobStore:
         data: dict[str, Any] | None = None,
     ) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO job_events (job_id, event_type, message, data_json, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (job_id, str(event_type), message, _json_dumps(data or {}), time.time()),
-            )
+            _add_event_conn(conn, job_id, event_type, message=message, data=data, created_at=time.time())
 
     @staticmethod
     def _resolve_priority(payload: dict[str, Any], priority: int | None, job_type: JobType) -> int:
@@ -782,3 +886,21 @@ def _stage_value(stage: JobStage | str) -> str:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, default=str)
+
+
+def _add_event_conn(
+    conn: sqlite3.Connection,
+    job_id: str,
+    event_type: str,
+    *,
+    message: str | None = None,
+    data: dict[str, Any] | None = None,
+    created_at: float,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO job_events (job_id, event_type, message, data_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (job_id, str(event_type), message, _json_dumps(data or {}), created_at),
+    )
