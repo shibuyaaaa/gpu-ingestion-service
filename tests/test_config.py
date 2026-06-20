@@ -16,6 +16,7 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
         "SOURCE_AUDIO_CACHE_MAX_BYTES",
         "ANALYSIS_CACHE_MAX_BYTES",
         "SEGMENT_STEM_CACHE_MAX_BYTES",
+        "GCS_SEGMENT_UPLOAD_URL_CACHE_MAX_ENTRIES",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -31,6 +32,7 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
     assert settings.analysis_cache_max_bytes == 2 * 1024**3
     assert settings.segment_stem_cache_max_bytes == 8 * 1024**3
     assert settings.gcs_segment_upload_cache_enabled is True
+    assert settings.gcs_segment_upload_url_cache_max_entries == 10000
 
 
 def test_cache_byte_env_accepts_human_readable_units(monkeypatch):

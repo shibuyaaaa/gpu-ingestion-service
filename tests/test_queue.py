@@ -252,6 +252,7 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
                 "segment_result": {
                     "timings": {
                         "stem_segment_extract_seconds": 1.25,
+                        "gcs_segment_upload_memory_cache_hit_count": 4,
                         "gcs_segment_upload_cache_lookup_count": 3,
                         "gcs_segment_upload_cache_hit_count": 2,
                         "gcs_segment_upload_cache_miss_count": 1,
@@ -286,6 +287,7 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["analyze"]["avg_seconds"]["processing_seconds"] is not None
         assert summary["process_by_mode"]["segment_other"]["count"] == 1
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["stem_segment_extract_seconds"] == 1.25
+        assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gcs_segment_upload_memory_cache_hit_count"] == 4.0
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gcs_segment_upload_cache_lookup_count"] == 3.0
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gcs_segment_upload_cache_hit_count"] == 2.0
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["gcs_segment_upload_cache_miss_count"] == 1.0

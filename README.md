@@ -88,6 +88,8 @@ run with `DRY_RUN_MODE=false`.
 - `GCS_SEGMENT_UPLOAD_CACHE_ENABLED`: deterministic GCS paths for cached segment
   stems, so repeated jobs can reuse existing uploaded MP3 objects instead of
   uploading identical bytes again. Default: enabled.
+- `GCS_SEGMENT_UPLOAD_URL_CACHE_MAX_ENTRIES`: process-local positive cache for
+  deterministic segment stem URLs already confirmed in GCS. Default: `10000`.
 - `MODEL_BACKEND`: `local`, `remote_gpu`, or `cloud_run_fallback`. Default: `local`.
 - `ALL_IN_ONE_GCP_URL`: Cloud Run all-in-one `/predict` service URL for remote GPU mode.
 - `ALL_IN_ONE_AUTH`: `none`, `api_key`, `google_id_token`, or `gcloud_identity_token`.

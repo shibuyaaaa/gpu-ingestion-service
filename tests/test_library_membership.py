@@ -811,6 +811,8 @@ async def test_segment_stem_cache_reuses_sliced_full_stem_segments(monkeypatch, 
 
 
 async def test_cached_segment_upload_reuses_existing_gcs_object(monkeypatch, tmp_path):
+    from app.jobs import adapters
+
     converted = False
 
     async def fake_convert_to_mp3(source, target):
@@ -821,8 +823,10 @@ async def test_cached_segment_upload_reuses_existing_gcs_object(monkeypatch, tmp
     class FakeGCS:
         def __init__(self):
             self.uploads = []
+            self.exists_calls = 0
 
         async def exists(self, gcs_path):
+            self.exists_calls += 1
             return True
 
         async def upload(self, local_path, gcs_path, *, content_type):
@@ -852,6 +856,7 @@ async def test_cached_segment_upload_reuses_existing_gcs_object(monkeypatch, tmp
         ),
     )
     monkeypatch.setattr("app.jobs.adapters.AudioOps.convert_to_mp3", fake_convert_to_mp3)
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
 
     timings = {}
     url = await BulkDissectAdapter._prepare_and_upload_stem(
@@ -867,9 +872,97 @@ async def test_cached_segment_upload_reuses_existing_gcs_object(monkeypatch, tmp
     assert url == "https://cdn.test/gpu-ingestion/cache/segment-stems/youtube-video-seg/other.mp3"
     assert context.gcs.uploads == []
     assert converted is False
+    assert context.gcs.exists_calls == 1
     assert timings["gcs_segment_upload_cache_lookup_count"] == 1
     assert timings["gcs_segment_upload_cache_hit_count"] == 1
     assert "gcs_segment_upload_count" not in timings
+
+    second_timings = {}
+    second_url = await BulkDissectAdapter._prepare_and_upload_stem(
+        stem="other",
+        path=str(local_stem.with_suffix(".wav")),
+        job_id="job-2",
+        segment_id="seg-1",
+        context=context,
+        upload_cache_key="youtube-video-seg",
+        timings=second_timings,
+    )
+
+    assert second_url == url
+    assert context.gcs.exists_calls == 1
+    assert second_timings["gcs_segment_upload_memory_cache_hit_count"] == 1
+    assert "gcs_segment_upload_cache_lookup_count" not in second_timings
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
+
+
+async def test_uploaded_segment_url_is_cached_after_gcs_miss(tmp_path):
+    from app.jobs import adapters
+
+    class FakeGCS:
+        def __init__(self):
+            self.exists_calls = 0
+            self.uploads = []
+
+        async def exists(self, gcs_path):
+            self.exists_calls += 1
+            return False
+
+        async def upload(self, local_path, gcs_path, *, content_type):
+            self.uploads.append(gcs_path)
+            return f"https://cdn.test/{gcs_path}"
+
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+        cdn_base_url="https://cdn.test",
+        gcs_segment_upload_cache_enabled=True,
+    )
+    local_stem = tmp_path / "other.mp3"
+    local_stem.write_bytes(b"mp3")
+    context = JobContext(
+        settings=settings,
+        store=JobStore(settings.queue_db_path),
+        models=None,
+        gcs=FakeGCS(),
+        db=DBClient(database_url=""),
+        library=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        library_writer=LibraryWriter(
+            db=DBClient(database_url=""),
+            settings=settings,
+            membership=LibraryMembershipChecker(db=DBClient(database_url=""), settings=settings),
+        ),
+    )
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
+
+    first_timings = {}
+    first = await BulkDissectAdapter._prepare_and_upload_stem(
+        stem="other",
+        path=str(local_stem),
+        job_id="job-1",
+        segment_id="seg-1",
+        context=context,
+        upload_cache_key="youtube-new-seg",
+        timings=first_timings,
+    )
+    second_timings = {}
+    second = await BulkDissectAdapter._prepare_and_upload_stem(
+        stem="other",
+        path=str(local_stem),
+        job_id="job-2",
+        segment_id="seg-1",
+        context=context,
+        upload_cache_key="youtube-new-seg",
+        timings=second_timings,
+    )
+
+    assert second == first
+    assert context.gcs.exists_calls == 1
+    assert context.gcs.uploads == ["gpu-ingestion/cache/segment-stems/youtube-new-seg/other.mp3"]
+    assert first_timings["gcs_segment_upload_cache_miss_count"] == 1
+    assert first_timings["gcs_segment_upload_count"] == 1
+    assert second_timings["gcs_segment_upload_memory_cache_hit_count"] == 1
+    adapters._GCS_SEGMENT_UPLOAD_URL_CACHE.clear()
 
 
 async def test_full_stem_segment_extraction_runs_stems_concurrently(monkeypatch, tmp_path):

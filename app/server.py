@@ -11,7 +11,7 @@ from app.cache_status import local_cache_status
 from app.config import settings
 from app.crawler.store import CrawlerStore
 from app.jobs import UnsupportedJobType, build_default_registry
-from app.jobs.adapters import cache_lock_status
+from app.jobs.adapters import cache_lock_status, gcs_upload_url_cache_status
 from app.jobs.context import JobContext
 from app.library_membership import LibraryMembershipChecker
 from app.library_writer import LibraryWriter
@@ -274,7 +274,7 @@ async def _safe_async_bool(fn) -> bool:
 
 
 async def _cache_status() -> dict[str, Any]:
-    return await asyncio.to_thread(
+    status = await asyncio.to_thread(
         local_cache_status,
         work_dir=settings.work_dir,
         source_audio_enabled=settings.source_audio_cache_enabled,
@@ -288,6 +288,10 @@ async def _cache_status() -> dict[str, Any]:
         segment_stem_max_bytes=settings.segment_stem_cache_max_bytes,
         lock_status=cache_lock_status(),
     )
+    status["gcs_upload_url"] = gcs_upload_url_cache_status(
+        max_entries=settings.gcs_segment_upload_url_cache_max_entries,
+    )
+    return status
 
 
 def _path_writable(path) -> bool:

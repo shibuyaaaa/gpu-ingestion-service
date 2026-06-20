@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ PROCESS_MODE_SEGMENT_OTHER = "segment_other"
 _SOURCE_AUDIO_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _ANALYSIS_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _SEGMENT_STEM_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+_GCS_SEGMENT_UPLOAD_URL_CACHE: OrderedDict[str, str] = OrderedDict()
 _MAX_CACHE_LOCKS = 2048
 
 
@@ -641,13 +643,26 @@ class DissectAdapter(JobAdapter):
             and exists_fn is not None
         )
         if cache_lookup_enabled:
+            cached_url = _get_cached_gcs_upload_url(
+                gcs_path,
+                max_entries=context.settings.gcs_segment_upload_url_cache_max_entries,
+            )
+            if cached_url is not None:
+                _add_timing_counter(timings, "gcs_segment_upload_memory_cache_hit_count")
+                return cached_url
             _add_timing_counter(timings, "gcs_segment_upload_cache_lookup_count")
             started = time.perf_counter()
             exists = await exists_fn(gcs_path)
             _add_timing_counter(timings, "gcs_segment_upload_cache_exists_seconds", time.perf_counter() - started)
             if exists:
                 _add_timing_counter(timings, "gcs_segment_upload_cache_hit_count")
-                return f"{context.settings.cdn_base_url}/{gcs_path}"
+                url = f"{context.settings.cdn_base_url}/{gcs_path}"
+                _remember_gcs_upload_url(
+                    gcs_path,
+                    url,
+                    max_entries=context.settings.gcs_segment_upload_url_cache_max_entries,
+                )
+                return url
             _add_timing_counter(timings, "gcs_segment_upload_cache_miss_count")
 
         if local_path.suffix.lower() != ".mp3":
@@ -657,7 +672,14 @@ class DissectAdapter(JobAdapter):
             local_path = mp3_path
             _add_timing_counter(timings, "gcs_segment_upload_convert_seconds", time.perf_counter() - started)
         _add_timing_counter(timings, "gcs_segment_upload_count")
-        return await context.gcs.upload(local_path, gcs_path, content_type="audio/mpeg")
+        url = await context.gcs.upload(local_path, gcs_path, content_type="audio/mpeg")
+        if upload_cache_key and context.settings.gcs_segment_upload_cache_enabled:
+            _remember_gcs_upload_url(
+                gcs_path,
+                url,
+                max_entries=context.settings.gcs_segment_upload_url_cache_max_entries,
+            )
+        return url
 
     async def _process_fanout_job(self, job: JobRecord, context: JobContext) -> StageResult:
         process_mode = job.artifacts.get("process_mode")
@@ -1489,6 +1511,33 @@ def _add_timing_counter(timings: dict[str, float] | None, key: str, value: float
     if timings is None:
         return
     timings[key] = round(float(timings.get(key, 0.0)) + float(value), 6)
+
+
+def _get_cached_gcs_upload_url(gcs_path: str, *, max_entries: int) -> str | None:
+    if max_entries <= 0:
+        return None
+    url = _GCS_SEGMENT_UPLOAD_URL_CACHE.get(gcs_path)
+    if url is None:
+        return None
+    _GCS_SEGMENT_UPLOAD_URL_CACHE.move_to_end(gcs_path)
+    return url
+
+
+def _remember_gcs_upload_url(gcs_path: str, url: str, *, max_entries: int) -> None:
+    if max_entries <= 0:
+        return
+    _GCS_SEGMENT_UPLOAD_URL_CACHE[gcs_path] = url
+    _GCS_SEGMENT_UPLOAD_URL_CACHE.move_to_end(gcs_path)
+    while len(_GCS_SEGMENT_UPLOAD_URL_CACHE) > max_entries:
+        _GCS_SEGMENT_UPLOAD_URL_CACHE.popitem(last=False)
+
+
+def gcs_upload_url_cache_status(*, max_entries: int) -> dict[str, Any]:
+    return {
+        "enabled": max_entries > 0,
+        "entries": len(_GCS_SEGMENT_UPLOAD_URL_CACHE),
+        "max_entries": max_entries,
+    }
 
 
 def cache_lock_status() -> dict[str, Any]:
