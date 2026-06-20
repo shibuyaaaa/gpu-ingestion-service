@@ -5,6 +5,7 @@ IMAGE="${IMAGE:-gpu-ingestion-service:local}"
 SERVICE_NAME="${SERVICE_NAME:-gpu-ingestion.service}"
 CRAWLER_SERVICE_NAME="${CRAWLER_SERVICE_NAME:-gpu-ingestion-crawler.service}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8080/health}"
+DOCKER_IMAGE_PRUNE_ARGS="${DOCKER_IMAGE_PRUNE_ARGS:--a -f}"
 
 cd "$(dirname "$0")/.."
 
@@ -35,6 +36,6 @@ else:
     raise SystemExit(f"service did not become healthy: {last_error}")
 PY
 
-sudo docker image prune -f
+sudo docker image prune ${DOCKER_IMAGE_PRUNE_ARGS}
 sudo docker builder prune -f --filter until=24h >/dev/null || true
 sudo docker system df

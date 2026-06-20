@@ -29,8 +29,9 @@ bash deploy/vm-deploy.sh
 ```
 
 The script fast-forwards the repo, rebuilds `gpu-ingestion-service:local`,
-restarts the API and crawler units, waits for `/health`, then prunes dangling
-Docker images left by previous local builds.
+restarts the API and crawler units, waits for `/health`, then prunes unused
+Docker images left by previous local builds. Set `DOCKER_IMAGE_PRUNE_ARGS="-f"`
+to keep tagged-but-unused images.
 
 ## Health Checks
 
