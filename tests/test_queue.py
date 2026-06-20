@@ -230,8 +230,21 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
             artifacts={
                 "analysis_timings": {
                     "allin1_analyze_seconds": 10.0,
+                    "byproduct_setup_seconds": 0.02,
+                    "find_analysis_json_seconds": 0.03,
+                    "load_analysis_json_seconds": 0.04,
+                    "find_demix_stems_seconds": 0.05,
+                    "demix_backend": "resident",
+                    "demix_track_count": 1,
+                    "demix_existing_tracks": 0,
+                    "demix_pending_tracks": 1,
+                    "demix_model_ready_seconds": 0.01,
                     "demix_total_seconds": 7.0,
                     "demix_apply_seconds": 5.0,
+                    "demix_audio_read_seconds": 0.4,
+                    "demix_normalize_seconds": 0.2,
+                    "demix_pin_seconds": 0.1,
+                    "demix_transfer_seconds": 0.3,
                     "demix_save_seconds": 2.0,
                     "demix_segment_seconds": 7.5,
                     "demix_segment_configured_seconds": 15.0,
@@ -284,7 +297,19 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["download"]["avg_seconds"]["queue_wait_seconds"] is not None
         assert summary["download"]["avg_seconds"]["processing_seconds"] is not None
         assert summary["analyze"]["count"] == 1
+        assert summary["analyze"]["avg_seconds"]["byproduct_setup_seconds"] == 0.02
+        assert summary["analyze"]["avg_seconds"]["find_analysis_json_seconds"] == 0.03
+        assert summary["analyze"]["avg_seconds"]["load_analysis_json_seconds"] == 0.04
+        assert summary["analyze"]["avg_seconds"]["find_demix_stems_seconds"] == 0.05
+        assert summary["analyze"]["avg_seconds"]["demix_track_count"] == 1.0
+        assert summary["analyze"]["avg_seconds"]["demix_existing_tracks"] == 0.0
+        assert summary["analyze"]["avg_seconds"]["demix_pending_tracks"] == 1.0
+        assert summary["analyze"]["avg_seconds"]["demix_model_ready_seconds"] == 0.01
         assert summary["analyze"]["avg_seconds"]["demix_save_seconds"] == 2.0
+        assert summary["analyze"]["avg_seconds"]["demix_audio_read_seconds"] == 0.4
+        assert summary["analyze"]["avg_seconds"]["demix_normalize_seconds"] == 0.2
+        assert summary["analyze"]["avg_seconds"]["demix_pin_seconds"] == 0.1
+        assert summary["analyze"]["avg_seconds"]["demix_transfer_seconds"] == 0.3
         assert summary["analyze"]["avg_seconds"]["demix_segment_seconds"] == 7.5
         assert summary["analyze"]["avg_seconds"]["demix_segment_configured_seconds"] == 15.0
         assert summary["analyze"]["avg_seconds"]["demix_segment_max_seconds"] == 7.5
@@ -314,6 +339,8 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["latest"][0]["duration_seconds"] >= summary["latest"][0]["processing_seconds"]
         assert summary["latest"][1]["queue_wait_seconds"] is not None
         assert summary["latest"][1]["processing_seconds"] is not None
+        assert summary["latest"][1]["timings"]["demix_backend"] == "resident"
+        assert summary["latest"][1]["timings"]["demix_model_ready_seconds"] == 0.01
         assert summary["latest"][1]["timings"]["fanout_child_count"] == 30
         assert summary["latest"][2]["timings"]["youtube_download_seconds"] == 2.0
 
