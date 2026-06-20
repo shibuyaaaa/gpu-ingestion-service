@@ -89,6 +89,18 @@ class JobStore:
                 DROP INDEX IF EXISTS idx_jobs_claim;
                 CREATE INDEX IF NOT EXISTS idx_jobs_claim
                     ON jobs(status, priority DESC, created_at ASC, id ASC, available_at, stage);
+                CREATE INDEX IF NOT EXISTS idx_jobs_claim_stage
+                    ON jobs(status, stage, priority DESC, created_at ASC, id ASC, available_at);
+                CREATE INDEX IF NOT EXISTS idx_jobs_claim_cpu_process
+                    ON jobs(
+                        status,
+                        stage,
+                        COALESCE(json_extract(artifacts_json, '$.requires_gpu'), 1),
+                        priority DESC,
+                        created_at ASC,
+                        id ASC,
+                        available_at
+                    );
                 CREATE INDEX IF NOT EXISTS idx_jobs_active_depth
                     ON jobs(status)
                     WHERE status NOT IN ('completed', 'failed');

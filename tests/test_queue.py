@@ -164,7 +164,34 @@ def test_claim_query_uses_scheduling_order_index_without_temp_sort():
             ).fetchall()
 
         detail = " ".join(str(row[-1]) for row in plan)
-        assert "idx_jobs_claim" in detail
+        assert "idx_jobs_claim_cpu_process" in detail
+        assert "USE TEMP B-TREE" not in detail
+
+
+def test_stage_claim_query_uses_stage_scheduling_index_without_temp_sort():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=20)
+        for idx in range(5):
+            store.enqueue({"job_id": f"download-{idx}", "job_type": "bulk_dissect", "source": "song"})
+
+        with sqlite3.connect(store.db_path) as conn:
+            plan = conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT * FROM jobs
+                WHERE status = ?
+                  AND available_at <= ?
+                  AND stage IN (?)
+                ORDER BY priority DESC,
+                         created_at ASC,
+                         id ASC
+                LIMIT ?
+                """,
+                (JobStatus.QUEUED.value, time.time(), JobStage.DOWNLOAD.value, 1),
+            ).fetchall()
+
+        detail = " ".join(str(row[-1]) for row in plan)
+        assert "idx_jobs_claim_stage" in detail
         assert "USE TEMP B-TREE" not in detail
 
 
