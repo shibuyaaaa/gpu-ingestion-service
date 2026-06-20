@@ -126,6 +126,57 @@ async def test_crawler_submits_batch_limit_and_skips_existing_library_songs():
         assert store.get_active_session()["status"] == "waiting"
 
 
+async def test_crawler_completes_empty_session_when_no_publishable_candidates_found():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(tmp, batch_size=3)
+        store = CrawlerStore(Path(tmp) / "crawler.sqlite3")
+        provider = FakeProvider([_candidate(str(idx), popularity=100 - idx, rank=idx) for idx in range(3)])
+        publisher = FakePublisher()
+        runner = CrawlerRunner(
+            settings=settings,
+            store=store,
+            provider=provider,
+            publisher=publisher,
+            ops=FakeOps(),
+            library=FakeLibrary(existing_ids={"0", "1", "2"}),
+        )
+
+        result = await runner.run_once()
+
+        assert result["status"] == "completed"
+        assert result["submitted_total"] == 0
+        assert publisher.payloads == []
+        assert store.get_active_session() is None
+        status = store.status()
+        assert status["sessions_by_status"] == {"completed": 1}
+        assert status["candidates_by_status"] == {"skipped_library": 3}
+
+
+async def test_crawler_keeps_empty_session_retryable_when_all_publishes_fail():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(tmp, batch_size=2)
+        store = CrawlerStore(Path(tmp) / "crawler.sqlite3")
+        provider = FakeProvider([_candidate("a", popularity=99, rank=0), _candidate("b", popularity=98, rank=1)])
+        publisher = FakePublisher(fail_for={"spotify:track:a", "spotify:track:b"})
+        runner = CrawlerRunner(
+            settings=settings,
+            store=store,
+            provider=provider,
+            publisher=publisher,
+            ops=FakeOps(),
+            library=FakeLibrary(),
+        )
+
+        result = await runner.run_once()
+
+        assert result["status"] == "submitting"
+        assert result["publish_failures"] == 2
+        active = store.get_active_session()
+        assert active is not None
+        assert active["status"] == "submitting"
+        assert active["last_error"] == "all publish attempts failed"
+
+
 async def test_crawler_does_not_resubmit_consumed_candidates_across_sessions():
     with tempfile.TemporaryDirectory() as tmp:
         settings = _settings(tmp, batch_size=2)

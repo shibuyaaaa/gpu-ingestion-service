@@ -227,7 +227,7 @@ class CrawlerStore:
             )
             self._refresh_session_counts(conn, session_id)
 
-    def mark_session_completed(self, session_id: str) -> None:
+    def mark_session_completed(self, session_id: str, *, error: str | None = None) -> None:
         now = time.time()
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -236,10 +236,11 @@ class CrawlerStore:
                 SET status = 'completed',
                     updated_at = ?,
                     completed_at = ?,
-                    next_poll_at = NULL
+                    next_poll_at = NULL,
+                    last_error = COALESCE(?, last_error)
                 WHERE id = ?
                 """,
-                (now, now, session_id),
+                (now, now, error, session_id),
             )
             self._refresh_session_counts(conn, session_id)
 

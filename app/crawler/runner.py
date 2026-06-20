@@ -147,13 +147,19 @@ class CrawlerRunner:
                 error="one or more publishes failed" if publish_failures else None,
             )
             status = "waiting"
-        else:
+        elif publish_failures:
             self.store.mark_session_error(
                 session_id,
                 next_poll_at=self._now() + self.settings.crawler_poll_seconds,
-                error="no publishable candidates found",
+                error="all publish attempts failed",
             )
             status = "submitting"
+        else:
+            self.store.mark_session_completed(
+                session_id,
+                error="no publishable candidates found",
+            )
+            status = "completed"
 
         return {
             "session_id": session_id,
