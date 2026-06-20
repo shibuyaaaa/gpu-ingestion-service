@@ -87,6 +87,10 @@ class JobStore:
                     WHERE source_message_id IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_jobs_claim
                     ON jobs(status, stage, available_at, priority, created_at);
+                CREATE INDEX IF NOT EXISTS idx_jobs_payload_root
+                    ON jobs(json_extract(payload_json, '$.root_job_id'));
+                CREATE INDEX IF NOT EXISTS idx_jobs_payload_parent
+                    ON jobs(json_extract(payload_json, '$.parent_job_id'));
                 CREATE TABLE IF NOT EXISTS job_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL,
@@ -652,25 +656,21 @@ class JobStore:
 
     def child_summary(self, root_job_id: str, *, exclude_job_id: str | None = None) -> dict[str, int]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT id, status, payload_json FROM jobs").fetchall()
-        total = active = completed = failed = 0
-        for row in rows:
-            if exclude_job_id and row["id"] == exclude_job_id:
-                continue
-            try:
-                payload = json.loads(row["payload_json"])
-            except json.JSONDecodeError:
-                continue
-            if payload.get("root_job_id") != root_job_id:
-                continue
-            total += 1
-            status = row["status"]
-            if status == JobStatus.COMPLETED.value:
-                completed += 1
-            elif status == JobStatus.FAILED.value:
-                failed += 1
-            else:
-                active += 1
+            rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM jobs
+                WHERE json_extract(payload_json, '$.root_job_id') = ?
+                  AND (? IS NULL OR id != ?)
+                GROUP BY status
+                """,
+                (root_job_id, exclude_job_id, exclude_job_id),
+            ).fetchall()
+        counts = {row["status"]: int(row["count"]) for row in rows}
+        completed = counts.get(JobStatus.COMPLETED.value, 0)
+        failed = counts.get(JobStatus.FAILED.value, 0)
+        total = sum(counts.values())
+        active = total - completed - failed
         return {
             "total": total,
             "active": active,

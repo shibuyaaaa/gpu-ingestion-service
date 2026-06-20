@@ -398,6 +398,58 @@ def test_reconcile_failed_fanout_parent_when_children_completed():
         assert reconciled.artifacts["fanout_reconciled"]["completed_children"] == 1
 
 
+def test_child_summary_counts_only_matching_root_jobs_and_can_exclude_current_child():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=20)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        other_parent, _ = store.enqueue({"job_id": "other-root", "job_type": "bulk_dissect", "source": "other"})
+        completed_child = store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-0:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        active_child = store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-1:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-1"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        failed_child = store.enqueue_process_child(
+            parent_job=parent,
+            child_id="root:bulk:seg-2:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "song", "root_job_id": "root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-2"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        store.enqueue_process_child(
+            parent_job=other_parent,
+            child_id="other-root:bulk:seg-0:chord",
+            job_type=JobType.BULK_DISSECT,
+            payload={"source": "other", "root_job_id": "other-root"},
+            artifacts={"process_mode": "segment_chord", "segment_id": "seg-0"},
+            priority=PROCESS_PRIORITY_BULK_CHORD,
+        )
+        store.claim_next([JobStage.PROCESS], "process-worker")
+        store.complete_stage(completed_child.id, next_stage=None)
+        store.fail_stage(failed_child.id, "broken", retry_delay_seconds=0)
+        store.fail_stage(failed_child.id, "broken", retry_delay_seconds=0)
+        store.fail_stage(failed_child.id, "broken", retry_delay_seconds=0)
+
+        assert store.child_summary("root") == {"total": 3, "active": 1, "completed": 1, "failed": 1}
+        assert store.child_summary("root", exclude_job_id=active_child.id) == {
+            "total": 2,
+            "active": 0,
+            "completed": 1,
+            "failed": 1,
+        }
+
+
 def test_reconcile_failed_fanout_parent_waits_for_active_children():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
