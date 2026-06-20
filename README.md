@@ -72,6 +72,7 @@ run with `DRY_RUN_MODE=false`.
 - `ALL_IN_ONE_AUTH`: `none`, `api_key`, `google_id_token`, or `gcloud_identity_token`.
 - `ALL_IN_ONE_TIMEOUT_SECONDS`: remote GPU request timeout. Default: `1800`.
 - `ALL_IN_ONE_DEMUCS_SEGMENT_SECONDS`: memory-bounded Demucs segment size used inside all-in-one analysis. Default: `5`.
+- `ALL_IN_ONE_DEMUCS_OVERLAP`: Demucs split overlap inside all-in-one analysis. Default: `0.10` for faster L4 throughput.
 - `ALL_IN_ONE_DEMUCS_JOBS`: Demucs worker count used inside all-in-one analysis. Default: `0`.
 - `GPU_HEALTH_RESTART_*`: restart the service after repeated container GPU/NVML failures.
 - `DRY_RUN_MODE`: test/dev mode. Default: `false`.
