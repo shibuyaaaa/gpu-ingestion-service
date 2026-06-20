@@ -31,6 +31,7 @@ PROCESS_MODE_SEGMENT_CHORD = "segment_chord"
 PROCESS_MODE_SEGMENT_OTHER = "segment_other"
 _SOURCE_AUDIO_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _ANALYSIS_CACHE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+_MAX_CACHE_LOCKS = 2048
 
 
 class DissectAdapter(JobAdapter):
@@ -1133,12 +1134,7 @@ def _analysis_cache_key(artifacts: dict[str, Any]) -> str | None:
 
 
 def _analysis_cache_lock(cache_key: str) -> asyncio.Lock:
-    key = (id(asyncio.get_running_loop()), cache_key)
-    lock = _ANALYSIS_CACHE_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _ANALYSIS_CACHE_LOCKS[key] = lock
-    return lock
+    return _bounded_cache_lock(_ANALYSIS_CACHE_LOCKS, cache_key)
 
 
 def _analysis_cache_entry_complete(cache_dir: Path) -> bool:
@@ -1247,12 +1243,36 @@ async def _prune_analysis_cache(cache_root: Path, max_entries: int) -> None:
 
 
 def _source_audio_cache_lock(video_id: str) -> asyncio.Lock:
-    key = (id(asyncio.get_running_loop()), video_id)
-    lock = _SOURCE_AUDIO_CACHE_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _SOURCE_AUDIO_CACHE_LOCKS[key] = lock
+    return _bounded_cache_lock(_SOURCE_AUDIO_CACHE_LOCKS, video_id)
+
+
+def _bounded_cache_lock(lock_map: dict[tuple[int, str], asyncio.Lock], cache_key: str) -> asyncio.Lock:
+    key = (id(asyncio.get_running_loop()), cache_key)
+    lock = lock_map.get(key)
+    if lock is not None:
+        return lock
+    if len(lock_map) >= _MAX_CACHE_LOCKS:
+        _prune_unlocked_cache_locks(lock_map)
+    lock = asyncio.Lock()
+    lock_map[key] = lock
     return lock
+
+
+def _prune_unlocked_cache_locks(lock_map: dict[tuple[int, str], asyncio.Lock]) -> None:
+    target_size = max(0, _MAX_CACHE_LOCKS // 2)
+    for key, lock in list(lock_map.items()):
+        if len(lock_map) <= target_size:
+            break
+        if not lock.locked():
+            lock_map.pop(key, None)
+
+
+def cache_lock_status() -> dict[str, Any]:
+    return {
+        "source_audio_locks": len(_SOURCE_AUDIO_CACHE_LOCKS),
+        "analysis_locks": len(_ANALYSIS_CACHE_LOCKS),
+        "max_locks_per_map": _MAX_CACHE_LOCKS,
+    }
 
 
 async def _prune_source_audio_cache(cache_dir: Path, max_entries: int) -> None:

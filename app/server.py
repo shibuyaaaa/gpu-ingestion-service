@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import shutil
 from contextlib import asynccontextmanager
@@ -6,9 +7,11 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from app.cache_status import local_cache_status
 from app.config import settings
 from app.crawler.store import CrawlerStore
 from app.jobs import UnsupportedJobType, build_default_registry
+from app.jobs.adapters import cache_lock_status
 from app.jobs.context import JobContext
 from app.library_membership import LibraryMembershipChecker
 from app.library_writer import LibraryWriter
@@ -106,6 +109,7 @@ async def enqueue_manual_job(payload: dict[str, Any]) -> dict[str, Any]:
 @app.get("/health")
 async def health() -> dict[str, Any]:
     queue_state = store.stats()
+    cache_state = await _cache_status()
     external: dict[str, Any] = {"gcs": "skipped", "db": "skipped"}
     if not settings.dry_run_mode:
         external["gcs"] = await _safe_async_bool(lambda: gcs.health())
@@ -120,6 +124,7 @@ async def health() -> dict[str, Any]:
         "dry_run_mode": settings.dry_run_mode,
         "ingress": {"mode": "http", "queue": "sqlite"},
         "queue": queue_state,
+        "cache": cache_state,
         "workers": workers.state(),
         "external": external,
         "library": library.status(),
@@ -133,6 +138,7 @@ async def health() -> dict[str, Any]:
 async def ops_state() -> dict[str, Any]:
     return {
         "queue": store.stats(),
+        "cache": await _cache_status(),
         "workers": workers.state(),
         "models": models.status(),
         "library": library.status(),
@@ -256,12 +262,22 @@ async def root() -> dict[str, str]:
 
 
 async def _safe_async_bool(fn) -> bool:
-    import asyncio
-
     try:
         return bool(await asyncio.to_thread(fn))
     except Exception:
         return False
+
+
+async def _cache_status() -> dict[str, Any]:
+    return await asyncio.to_thread(
+        local_cache_status,
+        work_dir=settings.work_dir,
+        source_audio_enabled=settings.source_audio_cache_enabled,
+        source_audio_max_entries=settings.source_audio_cache_max_entries,
+        analysis_enabled=settings.analysis_cache_enabled,
+        analysis_max_entries=settings.analysis_cache_max_entries,
+        lock_status=cache_lock_status(),
+    )
 
 
 def _path_writable(path) -> bool:
