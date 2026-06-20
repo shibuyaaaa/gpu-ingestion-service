@@ -238,8 +238,11 @@ def test_recent_timing_summary_aggregates_analyze_and_process_timings():
         assert summary["completed_jobs_sampled"] == 2
         assert summary["analyze"]["count"] == 1
         assert summary["analyze"]["avg_seconds"]["demix_save_seconds"] == 2.0
+        assert summary["analyze"]["avg_seconds"]["processing_seconds"] is not None
         assert summary["process_by_mode"]["segment_other"]["count"] == 1
         assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["stem_segment_extract_seconds"] == 1.25
+        assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["queue_wait_seconds"] is not None
+        assert summary["process_by_mode"]["segment_other"]["avg_seconds"]["processing_seconds"] is not None
         assert [item["job_id"] for item in summary["latest"]] == ["process", "analyze"]
         assert summary["latest"][0]["queue_wait_seconds"] is not None
         assert summary["latest"][0]["processing_seconds"] is not None

@@ -840,7 +840,7 @@ class JobStore:
             if row["stage"] == JobStage.ANALYZE.value:
                 timings = artifacts.get("analysis_timings") or {}
                 if isinstance(timings, dict):
-                    analyze_timings.append(timings)
+                    analyze_timings.append({**timings, **durations})
                 latest.append(
                     {
                         "job_id": row["id"],
@@ -870,7 +870,7 @@ class JobStore:
             )
             timings = segment_result.get("timings") or {}
             if isinstance(timings, dict):
-                process_timings_by_mode.setdefault(process_mode, []).append(timings)
+                process_timings_by_mode.setdefault(process_mode, []).append({**timings, **durations})
             latest.append(
                 {
                     "job_id": row["id"],
@@ -904,6 +904,9 @@ class JobStore:
                     "demix_audio_read_seconds",
                     "demix_pin_seconds",
                     "demix_transfer_seconds",
+                    "queue_wait_seconds",
+                    "processing_seconds",
+                    "duration_seconds",
                 ],
             ),
             "process_by_mode": {
@@ -914,6 +917,9 @@ class JobStore:
                         "stem_segment_extract_seconds",
                         "source_segment_extract_seconds",
                         "upload_and_publish_seconds",
+                        "queue_wait_seconds",
+                        "processing_seconds",
+                        "duration_seconds",
                     ],
                 )
                 for mode, timings in sorted(process_timings_by_mode.items())
