@@ -460,6 +460,46 @@ def test_enqueue_process_children_inserts_batch_and_events():
         assert child_events[0]["data"]["created"] is True
 
 
+def test_enqueue_process_children_preserves_spec_order_for_same_priority_claims():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        parent, _ = store.enqueue({"job_id": "root", "job_type": "bulk_dissect", "source": "song"})
+        store.enqueue_process_children(
+            parent_job=parent,
+            children=[
+                {
+                    "child_id": "root:bulk:seg-1:chord",
+                    "job_type": JobType.BULK_DISSECT,
+                    "payload": {"source": "song", "root_job_id": "root"},
+                    "artifacts": {"process_mode": "segment_chord", "segment_id": "seg-1", "requires_gpu": False},
+                    "priority": PROCESS_PRIORITY_BULK_CHORD,
+                },
+                {
+                    "child_id": "root:bulk:seg-2:chord",
+                    "job_type": JobType.BULK_DISSECT,
+                    "payload": {"source": "song", "root_job_id": "root"},
+                    "artifacts": {"process_mode": "segment_chord", "segment_id": "seg-2", "requires_gpu": False},
+                    "priority": PROCESS_PRIORITY_BULK_CHORD,
+                },
+                {
+                    "child_id": "root:bulk:seg-10:chord",
+                    "job_type": JobType.BULK_DISSECT,
+                    "payload": {"source": "song", "root_job_id": "root"},
+                    "artifacts": {"process_mode": "segment_chord", "segment_id": "seg-10", "requires_gpu": False},
+                    "priority": PROCESS_PRIORITY_BULK_CHORD,
+                },
+            ],
+        )
+
+        claimed = store.claim_cpu_process_batch("process-worker", limit=3)
+
+        assert [job.id for job in claimed] == [
+            "root:bulk:seg-1:chord",
+            "root:bulk:seg-2:chord",
+            "root:bulk:seg-10:chord",
+        ]
+
+
 def test_enqueue_process_children_is_idempotent_for_existing_child_ids():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)

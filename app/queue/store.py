@@ -236,9 +236,10 @@ class JobStore:
             return []
         now = time.time()
         specs = []
-        for child in children:
+        for index, child in enumerate(children):
             job_type = JobType(str(child["job_type"]))
             child_id = str(child["child_id"])
+            sequence_time = now + (index * 0.000001)
             payload = dict(child.get("payload") or {})
             child_payload = {
                 **payload,
@@ -256,6 +257,7 @@ class JobStore:
                     "payload": child_payload,
                     "artifacts": artifacts,
                     "priority": priority,
+                    "created_at": sequence_time,
                 }
             )
 
@@ -294,9 +296,9 @@ class JobStore:
                             _json_dumps(spec["payload"]),
                             _json_dumps(spec["artifacts"]),
                             spec["priority"],
-                            now,
-                            now,
-                            now,
+                            spec["created_at"],
+                            spec["created_at"],
+                            spec["created_at"],
                         ),
                     )
 
