@@ -1,6 +1,11 @@
 import pytest
 
 from app.jobs.adapters import BulkDissectAdapter
+from app.jobs.adapters import (
+    _enrich_payload_spotify_metadata_if_needed,
+    _merge_metadata_prefer_enriched,
+    _payload_spotify_metadata_needs_enrichment,
+)
 from app.legacy.utils.source import (
     _artists_from_embed_html,
     _first_text,
@@ -44,6 +49,77 @@ def test_source_aliases_are_accepted(field):
 def test_source_is_required():
     with pytest.raises(RuntimeError):
         BulkDissectAdapter._source_from_payload({"local_path": "/tmp/song.wav"})
+
+
+def test_partial_crawler_spotify_metadata_needs_enrichment():
+    assert _payload_spotify_metadata_needs_enrichment(
+        source="spotify:track:abc",
+        metadata={"title": "Song", "artist": "Artist", "popularity": 90},
+    )
+    assert not _payload_spotify_metadata_needs_enrichment(
+        source="spotify:track:abc",
+        metadata={
+            "title": "Song",
+            "artist": "Artist",
+            "album_art_url": "https://img",
+            "album_art_highres": "https://img",
+            "genre": "pop",
+        },
+    )
+
+
+def test_enriched_metadata_wins_over_partial_payload():
+    merged = _merge_metadata_prefer_enriched(
+        {
+            "title": "Spotify Title",
+            "artist": "Spotify Artist",
+            "album_art_url": "https://cover",
+            "album_art_highres": "https://cover-hi",
+            "genre": "pop",
+        },
+        {
+            "title": "Chart Title",
+            "artist": "Chart Artist",
+            "popularity": 90,
+        },
+    )
+
+    assert merged["title"] == "Spotify Title"
+    assert merged["album_art_url"] == "https://cover"
+    assert merged["genre"] == "pop"
+    assert merged["popularity"] == 90
+
+
+@pytest.mark.asyncio
+async def test_partial_crawler_metadata_is_enriched_from_spotify_source(monkeypatch):
+    async def fake_resolve_source_metadata(source: str):
+        assert source == "spotify:track:abc"
+        return {
+            "source": source,
+            "spotify_metadata": {
+                "spotify_id": "abc",
+                "title": "Resolved Song",
+                "artist": "Resolved Artist",
+                "album_art_url": "https://cover",
+                "album_art_highres": "https://cover-hi",
+                "album_art_medres": "https://cover-med",
+                "album_art_lowres": "https://cover-low",
+                "genre": "indie pop",
+                "genres": ["indie pop"],
+            },
+        }
+
+    monkeypatch.setattr("app.jobs.adapters.resolve_source_metadata", fake_resolve_source_metadata)
+
+    metadata = await _enrich_payload_spotify_metadata_if_needed(
+        source="spotify:track:abc",
+        metadata={"spotify_id": "abc", "title": "Chart Song", "artist": "Chart Artist", "popularity": 80},
+    )
+
+    assert metadata["title"] == "Resolved Song"
+    assert metadata["album_art_url"] == "https://cover"
+    assert metadata["genre"] == "indie pop"
+    assert metadata["popularity"] == 80
 
 
 def test_spotify_embed_artist_parser():

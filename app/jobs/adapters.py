@@ -71,7 +71,12 @@ class DissectAdapter(JobAdapter):
             payload_metadata = job.payload.get("spotify_metadata")
             skip_library_precheck = _truthy_payload_flag(job, "skip_library_precheck")
             if isinstance(payload_metadata, dict) and payload_metadata.get("title"):
-                timings["source_metadata_seconds"] = 0.0
+                started = time.perf_counter()
+                payload_metadata = await _enrich_payload_spotify_metadata_if_needed(
+                    source=source,
+                    metadata=payload_metadata,
+                )
+                timings["source_metadata_seconds"] = round(time.perf_counter() - started, 6)
                 resolved = {
                     "source": source,
                     "spotify_metadata": payload_metadata,
@@ -2147,3 +2152,44 @@ def _minimal_youtube_resolved(source: str) -> dict[str, Any]:
             "metadata_source": "skipped_for_direct_youtube_download",
         },
     }
+
+
+async def _enrich_payload_spotify_metadata_if_needed(*, source: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    if not _payload_spotify_metadata_needs_enrichment(source=source, metadata=metadata):
+        return metadata
+    try:
+        resolved = await resolve_source_metadata(source)
+    except Exception:
+        return metadata
+    enriched = resolved.get("spotify_metadata")
+    if not isinstance(enriched, dict):
+        return metadata
+    return _merge_metadata_prefer_enriched(enriched, metadata)
+
+
+def _payload_spotify_metadata_needs_enrichment(*, source: str, metadata: dict[str, Any]) -> bool:
+    if not str(source or "").startswith("spotify:track:") and "open.spotify.com/track/" not in str(source or ""):
+        return False
+    return not (
+        _truthy_metadata_value(metadata.get("album_art_url"))
+        and _truthy_metadata_value(metadata.get("album_art_highres"))
+        and _truthy_metadata_value(metadata.get("genre"))
+    )
+
+
+def _merge_metadata_prefer_enriched(enriched: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(enriched)
+    for key, value in fallback.items():
+        if not _truthy_metadata_value(merged.get(key)) and _truthy_metadata_value(value):
+            merged[key] = value
+    return merged
+
+
+def _truthy_metadata_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_truthy_metadata_value(item) for item in value)
+    return True
