@@ -199,11 +199,11 @@ async def test_worker_completes_local_dry_run_job():
             assert other.status == JobStatus.COMPLETED
             assert chord.artifacts["final_outputs"]["chord_outputs"]
             assert other.artifacts["final_outputs"]["stem_outputs"]
-            assert "analysis" not in chord.artifacts
+            assert chord.artifacts["analysis"]["duration"] > 0
             assert "segments" not in chord.artifacts
             assert "chorus_segment" not in chord.artifacts
             assert "full_stem_urls" not in chord.artifacts
-            assert "analysis" not in other.artifacts
+            assert other.artifacts["analysis"]["duration"] > 0
             assert "segments" not in other.artifacts
             assert "chorus_segment" not in other.artifacts
             assert "full_stem_urls" not in other.artifacts

@@ -961,6 +961,11 @@ async def test_analyze_reuses_cached_all_in_one_outputs_for_same_youtube_source(
             "segment_chord",
             "segment_other",
         ]
+        fanout_children = store.child_jobs(jobs[1].id)
+        assert fanout_children
+        child_records = [store.get(child["id"]) for child in fanout_children]
+        assert all(child is not None for child in child_records)
+        assert all(child.artifacts["analysis"]["duration"] == 30.0 for child in child_records if child)
 
 
 async def test_missing_library_song_continues_download_stage(monkeypatch):

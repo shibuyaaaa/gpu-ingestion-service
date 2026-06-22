@@ -597,6 +597,7 @@ class DissectAdapter(JobAdapter):
             or artifacts.get("existing_library_song_id"),
             "spotify_metadata": job.artifacts.get("spotify_metadata"),
             "youtube_match": job.artifacts.get("youtube_match"),
+            "analysis": artifacts.get("analysis") or job.artifacts.get("analysis") or {},
             "analyzer_result_path": artifacts.get("analyzer_result_path"),
             "analyzer_result_url": artifacts.get("analyzer_result_url"),
             "full_stem_paths": artifacts.get("full_stem_paths", {}),
