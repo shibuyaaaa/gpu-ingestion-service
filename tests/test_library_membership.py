@@ -39,6 +39,63 @@ def test_library_publish_result_serializes_uuid_rows():
     assert result.to_dict()["inserted_stems"][0]["id"] == str(stem_id)
 
 
+def test_beat_analysis_bpm_uses_beat_times_not_beat_positions():
+    analysis = {
+        "bpm": 105,
+        "beats": [0.09, 0.65, 1.23, 1.81, 2.36, 2.94, 3.53],
+        "beat_positions": [1, 2, 3, 4, 1, 2, 3],
+    }
+
+    all_in_one_bpm, beat_analysis_bpm = _analysis_bpms(analysis)
+
+    assert all_in_one_bpm == 105
+    assert beat_analysis_bpm is not None
+    assert 100 <= beat_analysis_bpm <= 110
+
+
+def test_analysis_payload_exposes_enriched_beat_grid_key_and_genre(tmp_path):
+    settings = Settings(
+        queue_db_path=tmp_path / "queue.sqlite3",
+        work_dir=tmp_path / "work",
+        dry_run_mode=False,
+    )
+    store = JobStore(settings.queue_db_path)
+    job, _ = store.enqueue(
+        {
+            "job_id": "analysis-payload",
+            "job_type": "bulk_dissect",
+            "source": "song",
+        }
+    )
+    job.artifacts.update(
+        {
+            "analysis": {
+                "bpm": 105,
+                "beat_analysis_bpm": 105.1,
+                "key": "F# minor",
+                "beats": [0.0, 0.5, 1.0, 1.5],
+                "downbeats": [0.0],
+                "upbeats": [0.5, 1.0, 1.5],
+                "beat_grid": [
+                    {"time": 0.0, "position": 1, "is_downbeat": True, "is_upbeat": False},
+                    {"time": 0.5, "position": 2, "is_downbeat": False, "is_upbeat": True},
+                ],
+                "segments": [{"id": "seg-0", "start": 0, "end": 4, "label": "chorus"}],
+            },
+            "spotify_metadata": {"title": "Song", "artist": "Artist", "genre": "indietronica"},
+        }
+    )
+
+    payload = _analysis_payload(job, status="partial")
+
+    assert payload["gpu_ingestion"]["summary"]["key"] == "F# minor"
+    assert payload["gpu_ingestion"]["summary"]["genre"] == "indietronica"
+    assert payload["gpu_ingestion"]["summary"]["beat_count"] == 4
+    assert payload["gpu_ingestion"]["summary"]["downbeat_count"] == 1
+    assert payload["gpu_ingestion"]["summary"]["upbeat_count"] == 3
+    assert payload["analysis"]["beat_grid"][1]["is_upbeat"] is True
+
+
 async def test_library_writer_skips_db_when_job_requests_no_library_write():
     with tempfile.TemporaryDirectory() as tmp:
         settings = Settings(
@@ -691,7 +748,8 @@ def test_analysis_payload_preserves_bpm_identity_and_source_audio():
                 "spotify_metadata": {"title": "Song", "artist": "Artist", "key": "D minor"},
                 "analysis": {
                     "bpm": 115,
-                    "beat_positions": [0.0, 0.5, 1.0, 1.5],
+                    "beats": [0.0, 0.5, 1.0, 1.5],
+                    "beat_positions": [1, 2, 3, 4],
                     "segments": [{"id": "seg-0"}],
                 },
             },

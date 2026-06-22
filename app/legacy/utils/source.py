@@ -208,7 +208,7 @@ async def _spotify_track_from_source(source: str) -> dict[str, Any]:
         if os.getenv("SPOTIFY_TRACK_METADATA_SOURCE", "embed").strip().lower() == "embed":
             return await _get_spotify_embed_track(track_id)
         track = await _get_spotify_track(track_id)
-        return _format_spotify_track(track)
+        return await _with_spotify_artist_genres(_format_spotify_track(track))
     tracks = await _search_spotify_tracks(source, limit=1)
     if not tracks:
         return {
@@ -226,7 +226,7 @@ async def _spotify_track_from_source(source: str) -> dict[str, Any]:
             "popularity": 0,
             "query_only": True,
         }
-    return tracks[0]
+    return await _with_spotify_artist_genres(tracks[0])
 
 
 def _extract_spotify_track_id(source: str) -> str | None:
@@ -277,7 +277,7 @@ async def _get_spotify_embed_track(track_id: str) -> dict[str, Any]:
 
     artists = _artists_from_embed_html(embed_html)
     title = str(oembed.get("title") or "").strip()
-    return {
+    metadata = {
         "spotify_id": track_id,
         "title": title or track_id,
         "artist": artists[0] if artists else "",
@@ -292,6 +292,15 @@ async def _get_spotify_embed_track(track_id: str) -> dict[str, Any]:
         "popularity": 0,
         "metadata_source": "spotify_embed",
     }
+    try:
+        api_metadata = await _with_spotify_artist_genres(_format_spotify_track(await _get_spotify_track(track_id)))
+        return {
+            **metadata,
+            **{key: value for key, value in api_metadata.items() if value not in (None, "", [])},
+            "metadata_source": "spotify_embed_api_enriched",
+        }
+    except Exception:
+        return metadata
 
 
 def _artists_from_embed_html(html: str) -> list[str]:
@@ -352,7 +361,10 @@ def _format_spotify_track(track: dict[str, Any]) -> dict[str, Any]:
         key=lambda image: image.get("height", 0),
         reverse=True,
     )
-    artists = [artist.get("name", "") for artist in track.get("artists", []) if artist.get("name")]
+    artist_items = [artist for artist in track.get("artists", []) if isinstance(artist, dict)]
+    artists = [artist.get("name", "") for artist in artist_items if artist.get("name")]
+    artist_ids = [artist.get("id", "") for artist in artist_items if artist.get("id")]
+    genres = _spotify_artist_genres_from_track(track)
     album_art_highres = images[0]["url"] if len(images) > 0 else None
     album_art_medres = images[1]["url"] if len(images) > 1 else album_art_highres
     album_art_lowres = images[2]["url"] if len(images) > 2 else album_art_medres
@@ -361,6 +373,7 @@ def _format_spotify_track(track: dict[str, Any]) -> dict[str, Any]:
         "title": track.get("name", ""),
         "artist": artists[0] if artists else "",
         "artists": artists,
+        "artist_ids": artist_ids,
         "album": track.get("album", {}).get("name", ""),
         "duration_ms": track.get("duration_ms", 0),
         "album_art_url": album_art_highres,
@@ -369,7 +382,45 @@ def _format_spotify_track(track: dict[str, Any]) -> dict[str, Any]:
         "album_art_lowres": album_art_lowres,
         "isrc": track.get("external_ids", {}).get("isrc"),
         "popularity": track.get("popularity", 0),
+        "genre": genres[0] if genres else "",
+        "genres": genres,
     }
+
+
+async def _with_spotify_artist_genres(metadata: dict[str, Any]) -> dict[str, Any]:
+    if metadata.get("genres"):
+        return metadata
+    artist_ids = [str(value) for value in metadata.get("artist_ids") or [] if str(value or "").strip()]
+    if not artist_ids:
+        return metadata
+    data = await _spotify_get_json("https://api.spotify.com/v1/artists", params={"ids": ",".join(artist_ids[:50])})
+    genres = []
+    for artist in data.get("artists") or []:
+        if not isinstance(artist, dict):
+            continue
+        for genre in artist.get("genres") or []:
+            text = str(genre or "").strip()
+            if text and text not in genres:
+                genres.append(text)
+    if not genres:
+        return metadata
+    return {
+        **metadata,
+        "genre": genres[0],
+        "genres": genres,
+    }
+
+
+def _spotify_artist_genres_from_track(track: dict[str, Any]) -> list[str]:
+    genres = []
+    for artist in track.get("artists", []):
+        if not isinstance(artist, dict):
+            continue
+        for genre in artist.get("genres") or []:
+            text = str(genre or "").strip()
+            if text and text not in genres:
+                genres.append(text)
+    return genres
 
 
 async def _find_youtube_match(track: dict[str, Any], *, max_results: int) -> dict[str, Any] | None:

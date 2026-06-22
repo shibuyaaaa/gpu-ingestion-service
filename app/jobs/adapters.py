@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from app.analysis_enrichment import enrich_analysis
 from app.identity import ingestion_identity_key, safe_identity_part
 from app.jobs.base import JobAdapter, StageResult
 from app.jobs.context import JobContext
@@ -391,7 +392,18 @@ class DissectAdapter(JobAdapter):
             )
         else:
             analysis_timings = dict(result.get("timings") or {})
-        analysis = result.get("analysis", {})
+        enrich_started = time.perf_counter()
+        analysis, enrich_timings = await asyncio.to_thread(
+            enrich_analysis,
+            result.get("analysis", {}),
+            audio_path,
+        )
+        analysis_timings.update(enrich_timings)
+        analysis_timings["analysis_enrichment_total_seconds"] = round(time.perf_counter() - enrich_started, 6)
+        result["analysis"] = analysis
+        enriched_analysis_path = output_dir / "analyzer_result.enriched.json"
+        enriched_analysis_path.write_text(json.dumps(analysis, indent=2, sort_keys=True), encoding="utf-8")
+        result["analyzer_result_path"] = str(enriched_analysis_path)
         segments = self._normalize_segments(analysis)
         chorus_segment = self._find_chorus_segment(segments)
         full_stem_urls = result.get("stem_urls") or {}

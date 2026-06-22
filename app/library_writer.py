@@ -191,7 +191,7 @@ class LibraryWriter:
             beat_analysis_bpm,
             _analysis_key(analysis, metadata),
             str(job.artifacts.get("source_audio_url") or ""),
-            str(metadata.get("genre") or ""),
+            _analysis_genre(analysis, metadata),
             youtube_url,
             json.dumps(_analysis_payload(job, status="partial")),
             metadata.get("album_art_lowres") or metadata.get("album_art_url"),
@@ -229,7 +229,8 @@ class LibraryWriter:
                 beat_analysis_bpm = COALESCE($7, beat_analysis_bpm),
                 key = COALESCE(NULLIF($8, ''), key),
                 youtube_url = COALESCE(NULLIF($9, ''), youtube_url),
-                audio_url = COALESCE(NULLIF($10, ''), audio_url)
+                audio_url = COALESCE(NULLIF($10, ''), audio_url),
+                genre = COALESCE(NULLIF($11, ''), genre)
             WHERE id = $1
             """,
             song_id,
@@ -242,6 +243,7 @@ class LibraryWriter:
             _analysis_key(analysis, metadata),
             str(job.artifacts.get("youtube_url") or ""),
             str(job.artifacts.get("source_audio_url") or ""),
+            _analysis_genre(analysis, metadata),
         )
 
     async def _ensure_artist(self, conn: Any, name: str) -> str:
@@ -368,7 +370,9 @@ class LibraryWriter:
             SET analysis_json = $2,
                 all_in_one_bpm = COALESCE($3, all_in_one_bpm),
                 beat_analysis_bpm = COALESCE($4, beat_analysis_bpm),
-                audio_url = COALESCE(NULLIF($5, ''), audio_url)
+                audio_url = COALESCE(NULLIF($5, ''), audio_url),
+                key = COALESCE(NULLIF($6, ''), key),
+                genre = COALESCE(NULLIF($7, ''), genre)
             WHERE id = $1
             """,
             song_id,
@@ -376,6 +380,8 @@ class LibraryWriter:
             all_in_one_bpm,
             beat_analysis_bpm,
             str(job.artifacts.get("source_audio_url") or ""),
+            _analysis_key(job.artifacts.get("analysis") or {}, job.artifacts.get("spotify_metadata") or {}),
+            _analysis_genre(job.artifacts.get("analysis") or {}, job.artifacts.get("spotify_metadata") or {}),
         )
 
     async def _song_for_cache(self, conn: Any, song_id: str, *, status: str) -> LibrarySong | None:
@@ -482,7 +488,11 @@ def _analysis_bpms(analysis: dict[str, Any]) -> tuple[float | None, float | None
         analysis.get("beat_bpm"),
         _nested_value(analysis.get("bpm"), "beat_analysis"),
         _nested_value(analysis.get("beats"), "bpm"),
-        _estimate_bpm_from_beats(analysis.get("beat_positions") or analysis.get("beats")),
+        _estimate_bpm_from_beats(
+            analysis.get("beats")
+            or analysis.get("beat_times")
+            or analysis.get("beat_timestamps")
+        ),
     )
     return bpm or beat_bpm, beat_bpm or bpm
 
@@ -499,6 +509,26 @@ def _analysis_key(analysis: dict[str, Any], metadata: dict[str, Any]) -> str:
         text = str(value or "").strip()
         if text:
             return text
+    return ""
+
+
+def _analysis_genre(analysis: dict[str, Any], metadata: dict[str, Any]) -> str:
+    for value in (
+        metadata.get("genre"),
+        analysis.get("genre"),
+        analysis.get("detected_genre"),
+        _nested_value(analysis.get("genre"), "name"),
+        _nested_value(analysis.get("genre"), "value"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    genres = metadata.get("genres") or analysis.get("genres")
+    if isinstance(genres, list):
+        for value in genres:
+            text = str(value or "").strip()
+            if text:
+                return text
     return ""
 
 
@@ -566,8 +596,12 @@ def _analysis_payload(job: JobRecord, *, status: str) -> dict[str, Any]:
                 "beat_analysis_bpm": beat_analysis_bpm,
                 "bpm": all_in_one_bpm or beat_analysis_bpm,
                 "key": _analysis_key(analysis, job.artifacts.get("spotify_metadata") or {}),
+                "genre": _analysis_genre(analysis, job.artifacts.get("spotify_metadata") or {}),
                 "segment_count": len(analysis.get("segments") or []),
                 "duration": _number_or_none(analysis.get("duration")),
+                "beat_count": len(analysis.get("beats") or []),
+                "downbeat_count": len(analysis.get("downbeats") or []),
+                "upbeat_count": len(analysis.get("upbeats") or []),
             },
             "status": status,
             "updated_at": datetime.now(timezone.utc).isoformat(),
