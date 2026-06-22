@@ -393,7 +393,10 @@ async def _with_spotify_artist_genres(metadata: dict[str, Any]) -> dict[str, Any
     artist_ids = [str(value) for value in metadata.get("artist_ids") or [] if str(value or "").strip()]
     if not artist_ids:
         return metadata
-    data = await _spotify_get_json("https://api.spotify.com/v1/artists", params={"ids": ",".join(artist_ids[:50])})
+    try:
+        data = await _spotify_get_json("https://api.spotify.com/v1/artists", params={"ids": ",".join(artist_ids[:50])})
+    except Exception:
+        return metadata
     genres = []
     for artist in data.get("artists") or []:
         if not isinstance(artist, dict):

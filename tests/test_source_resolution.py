@@ -1,7 +1,12 @@
 import pytest
 
 from app.jobs.adapters import BulkDissectAdapter
-from app.legacy.utils.source import _artists_from_embed_html, download_youtube_audio, extract_youtube_video_id
+from app.legacy.utils.source import (
+    _artists_from_embed_html,
+    _with_spotify_artist_genres,
+    download_youtube_audio,
+    extract_youtube_video_id,
+)
 
 
 def test_source_field_is_canonical_source():
@@ -44,6 +49,17 @@ def test_spotify_embed_artist_parser():
     html = '"artists":[{"name":"Bello\\u0026Dallas","uri":"spotify:artist:2zW"}]'
 
     assert _artists_from_embed_html(html) == ["Bello&Dallas"]
+
+
+@pytest.mark.asyncio
+async def test_spotify_artist_genre_enrichment_fails_open(monkeypatch):
+    async def fake_spotify_get_json(*args, **kwargs):
+        raise RuntimeError("403 Forbidden")
+
+    monkeypatch.setattr("app.legacy.utils.source._spotify_get_json", fake_spotify_get_json)
+    metadata = {"artist_ids": ["artist-1"], "title": "Song"}
+
+    assert await _with_spotify_artist_genres(metadata) == metadata
 
 
 def test_chorus_fallback_uses_longest_useful_segment():
