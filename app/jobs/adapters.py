@@ -2164,7 +2164,7 @@ async def _enrich_payload_spotify_metadata_if_needed(*, source: str, metadata: d
     enriched = resolved.get("spotify_metadata")
     if not isinstance(enriched, dict):
         return metadata
-    return _merge_metadata_prefer_enriched(enriched, metadata)
+    return _with_default_music_genre(_merge_metadata_prefer_enriched(enriched, metadata))
 
 
 def _payload_spotify_metadata_needs_enrichment(*, source: str, metadata: dict[str, Any]) -> bool:
@@ -2183,6 +2183,20 @@ def _merge_metadata_prefer_enriched(enriched: dict[str, Any], fallback: dict[str
         if not _truthy_metadata_value(merged.get(key)) and _truthy_metadata_value(value):
             merged[key] = value
     return merged
+
+
+def _with_default_music_genre(metadata: dict[str, Any]) -> dict[str, Any]:
+    if _truthy_metadata_value(metadata.get("genre")):
+        return metadata
+    genres = metadata.get("genres")
+    if isinstance(genres, list) and _truthy_metadata_value(genres):
+        return metadata
+    return {
+        **metadata,
+        "genre": "Music",
+        "genres": ["Music"],
+        "genre_source": "fallback_music",
+    }
 
 
 def _truthy_metadata_value(value: Any) -> bool:

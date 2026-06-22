@@ -5,6 +5,7 @@ from app.jobs.adapters import (
     _enrich_payload_spotify_metadata_if_needed,
     _merge_metadata_prefer_enriched,
     _payload_spotify_metadata_needs_enrichment,
+    _with_default_music_genre,
 )
 from app.legacy.utils.source import (
     _artists_from_embed_html,
@@ -88,6 +89,21 @@ def test_enriched_metadata_wins_over_partial_payload():
     assert merged["album_art_url"] == "https://cover"
     assert merged["genre"] == "pop"
     assert merged["popularity"] == 90
+
+
+def test_spotify_metadata_without_genre_gets_honest_default():
+    metadata = _with_default_music_genre(
+        {
+            "title": "Song",
+            "artist": "Artist",
+            "album_art_url": "https://cover",
+            "genres": [],
+        }
+    )
+
+    assert metadata["genre"] == "Music"
+    assert metadata["genres"] == ["Music"]
+    assert metadata["genre_source"] == "fallback_music"
 
 
 @pytest.mark.asyncio
