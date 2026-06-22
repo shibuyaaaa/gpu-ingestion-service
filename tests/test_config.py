@@ -20,6 +20,8 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
         "GCS_SEGMENT_UPLOAD_URL_CACHE_MAX_ENTRIES",
         "GCS_SEGMENT_UPLOAD_DISK_CACHE_ENABLED",
         "GCS_SEGMENT_UPLOAD_DISK_CACHE_PATH",
+        "SOURCE_AUDIO_UPLOAD_ENABLED",
+        "ANALYZER_RESULT_UPLOAD_ENABLED",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -39,6 +41,8 @@ def test_default_worker_counts_match_l4_cpu_split(monkeypatch):
     assert settings.gcs_segment_upload_url_cache_max_entries == 10000
     assert settings.gcs_segment_upload_disk_cache_enabled is True
     assert settings.gcs_segment_upload_disk_cache_path == ""
+    assert settings.source_audio_upload_enabled is True
+    assert settings.analyzer_result_upload_enabled is True
 
 
 def test_cache_byte_env_accepts_human_readable_units(monkeypatch):

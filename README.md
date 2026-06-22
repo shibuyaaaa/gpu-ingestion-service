@@ -77,6 +77,12 @@ run with `DRY_RUN_MODE=false`.
   `SOURCE_AUDIO_CACHE_MAX_BYTES`: local normalized YouTube WAV cache. Default:
   enabled with `100` entries and `8gb`, with per-video in-flight locking so
   duplicate requests reuse the same source download/conversion.
+- `SOURCE_AUDIO_UPLOAD_ENABLED`: upload the downloaded full song to a
+  deterministic GCS MP3 path and persist that URL into `songs.audio_url`.
+  Default: enabled.
+- `ANALYZER_RESULT_UPLOAD_ENABLED`: upload all-in-one analyzer JSON to a
+  deterministic GCS path when the model result does not already include one.
+  Default: enabled.
 - `ANALYSIS_CACHE_ENABLED`, `ANALYSIS_CACHE_MAX_ENTRIES`,
   `ANALYSIS_CACHE_MAX_BYTES`: local all-in-one analysis/full-stem cache keyed by
   YouTube id. Default: enabled with `4` entries and `2gb` because each entry

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import Settings
+from app.identity import identity_key_from_artifacts
 from app.library_membership import LibraryMembershipChecker, LibrarySong
 from app.legacy.db import DBClient
 from app.queue import JobRecord
@@ -58,6 +59,11 @@ class LibraryWriter:
             pool = await self.db.pool()
             async with pool.acquire() as conn:
                 async with conn.transaction():
+                    identity_key = identity_key_from_artifacts(job.artifacts, job.payload)
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext($1))",
+                        f"gpu_ingestion_song:{identity_key}",
+                    )
                     song_id = await self._ensure_song(conn, job)
                     artist_id = await self._main_artist_id(conn, song_id)
                     stem_rows = []
@@ -74,7 +80,7 @@ class LibraryWriter:
                             )
                         )
                     await self._update_ingestion_status(conn, song_id=song_id, job=job, status=status)
-                    song = await self._song_for_cache(conn, song_id)
+                    song = await self._song_for_cache(conn, song_id, status=status)
             if song:
                 self.membership.record_library_song(song)
             return LibraryPublishResult(
@@ -95,9 +101,14 @@ class LibraryWriter:
             pool = await self.db.pool()
             async with pool.acquire() as conn:
                 async with conn.transaction():
+                    identity_key = identity_key_from_artifacts(job.artifacts, job.payload)
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext($1))",
+                        f"gpu_ingestion_song:{identity_key}",
+                    )
                     song_id = await self._ensure_song(conn, job)
                     await self._update_ingestion_status(conn, song_id=song_id, job=job, status="complete")
-                    song = await self._song_for_cache(conn, song_id)
+                    song = await self._song_for_cache(conn, song_id, status="complete")
             if song:
                 self.membership.record_library_song(song)
             return LibraryPublishResult(enabled=True, song_id=song_id, status="complete")
@@ -105,6 +116,33 @@ class LibraryWriter:
             return LibraryPublishResult(enabled=True, status="complete", error=str(exc)[:1000])
 
     async def _ensure_song(self, conn: Any, job: JobRecord) -> str:
+        existing_library_song_id = str(
+            job.artifacts.get("existing_library_song_id")
+            or job.payload.get("existing_library_song_id")
+            or ""
+        ).strip()
+        if existing_library_song_id:
+            existing = await conn.fetchrow("SELECT id FROM songs WHERE id = $1 LIMIT 1", existing_library_song_id)
+            if existing:
+                await self._refresh_song_metadata(conn, existing["id"], job)
+                return str(existing["id"])
+
+        identity_key = identity_key_from_artifacts(job.artifacts, job.payload)
+        if identity_key and identity_key != "unknown":
+            existing = await conn.fetchrow(
+                """
+                SELECT id
+                FROM songs
+                WHERE POSITION($1 IN COALESCE(analysis_json::text, '')) > 0
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                identity_key,
+            )
+            if existing:
+                await self._refresh_song_metadata(conn, existing["id"], job)
+                return str(existing["id"])
+
         youtube_url = job.artifacts.get("youtube_url")
         if youtube_url:
             existing = await conn.fetchrow("SELECT id FROM songs WHERE youtube_url = $1 LIMIT 1", youtube_url)
@@ -134,6 +172,7 @@ class LibraryWriter:
             return str(existing["id"])
 
         analysis = job.artifacts.get("analysis") or {}
+        all_in_one_bpm, beat_analysis_bpm = _analysis_bpms(analysis)
         mix_id = await self._next_mix_id(conn)
         row = await conn.fetchrow(
             """
@@ -143,14 +182,15 @@ class LibraryWriter:
                 cover_art_square_lowres, cover_art_square_medres, cover_art_square_highres,
                 mix_id
             )
-            VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, $13)
             RETURNING id
             """,
             title,
             metadata.get("album_art_url") or metadata.get("album_art_highres"),
-            _number_or_none(analysis.get("bpm")),
-            _number_or_none(analysis.get("bpm")),
-            str(analysis.get("key") or metadata.get("key") or "C major"),
+            all_in_one_bpm,
+            beat_analysis_bpm,
+            _analysis_key(analysis, metadata),
+            str(job.artifacts.get("source_audio_url") or ""),
             str(metadata.get("genre") or ""),
             youtube_url,
             json.dumps(_analysis_payload(job, status="partial")),
@@ -177,6 +217,7 @@ class LibraryWriter:
     async def _refresh_song_metadata(self, conn: Any, song_id: str, job: JobRecord) -> None:
         metadata = job.artifacts.get("spotify_metadata") or {}
         analysis = job.artifacts.get("analysis") or {}
+        all_in_one_bpm, beat_analysis_bpm = _analysis_bpms(analysis)
         await conn.execute(
             """
             UPDATE songs
@@ -187,7 +228,8 @@ class LibraryWriter:
                 all_in_one_bpm = COALESCE($6, all_in_one_bpm),
                 beat_analysis_bpm = COALESCE($7, beat_analysis_bpm),
                 key = COALESCE(NULLIF($8, ''), key),
-                youtube_url = COALESCE(NULLIF($9, ''), youtube_url)
+                youtube_url = COALESCE(NULLIF($9, ''), youtube_url),
+                audio_url = COALESCE(NULLIF($10, ''), audio_url)
             WHERE id = $1
             """,
             song_id,
@@ -195,10 +237,11 @@ class LibraryWriter:
             metadata.get("album_art_lowres") or metadata.get("album_art_url") or "",
             metadata.get("album_art_medres") or metadata.get("album_art_url") or "",
             metadata.get("album_art_highres") or metadata.get("album_art_url") or "",
-            _number_or_none(analysis.get("bpm")),
-            _number_or_none(analysis.get("bpm")),
-            str(analysis.get("key") or metadata.get("key") or ""),
+            all_in_one_bpm,
+            beat_analysis_bpm,
+            _analysis_key(analysis, metadata),
             str(job.artifacts.get("youtube_url") or ""),
+            str(job.artifacts.get("source_audio_url") or ""),
         )
 
     async def _ensure_artist(self, conn: Any, name: str) -> str:
@@ -271,6 +314,8 @@ class LibraryWriter:
                     model = $4,
                     is_original = true,
                     is_full_song = false,
+                    has_audio = true,
+                    is_usable = true,
                     artist_id = COALESCE($5, artist_id)
                 WHERE id = $1
                 RETURNING id, song_id, stem_type, audio_url, segment, start_time, end_time
@@ -285,9 +330,9 @@ class LibraryWriter:
             """
             INSERT INTO stems (
                 song_id, stem_type, audio_url, is_original, label,
-                start_time, end_time, model, segment, is_full_song, artist_id, is_usable
+                start_time, end_time, model, segment, is_full_song, artist_id, has_audio, is_usable
             )
-            VALUES ($1, $2, $3, true, $4, $5, $6, $7, $8, false, $9, true)
+            VALUES ($1, $2, $3, true, $4, $5, $6, $7, $8, false, $9, true, true)
             RETURNING id, song_id, stem_type, audio_url, segment, start_time, end_time
             """,
             song_id,
@@ -316,9 +361,24 @@ class LibraryWriter:
         )
         payload["gpu_ingestion"]["available_stems"] = [dict(row) for row in available]
         payload["gpu_ingestion"]["available_stem_types"] = sorted({row["stem_type"] for row in available})
-        await conn.execute("UPDATE songs SET analysis_json = $2 WHERE id = $1", song_id, json.dumps(payload))
+        all_in_one_bpm, beat_analysis_bpm = _analysis_bpms(job.artifacts.get("analysis") or {})
+        await conn.execute(
+            """
+            UPDATE songs
+            SET analysis_json = $2,
+                all_in_one_bpm = COALESCE($3, all_in_one_bpm),
+                beat_analysis_bpm = COALESCE($4, beat_analysis_bpm),
+                audio_url = COALESCE(NULLIF($5, ''), audio_url)
+            WHERE id = $1
+            """,
+            song_id,
+            json.dumps(payload),
+            all_in_one_bpm,
+            beat_analysis_bpm,
+            str(job.artifacts.get("source_audio_url") or ""),
+        )
 
-    async def _song_for_cache(self, conn: Any, song_id: str) -> LibrarySong | None:
+    async def _song_for_cache(self, conn: Any, song_id: str, *, status: str) -> LibrarySong | None:
         row = await conn.fetchrow(
             """
             SELECT
@@ -344,7 +404,8 @@ class LibraryWriter:
             title=str(row["title"]),
             artists=artists,
             artist=artists[0] if artists else "",
-            metadata={"partial": True},
+            ingestion_status=status,
+            metadata={"partial": status != "complete"},
         )
 
 
@@ -406,14 +467,108 @@ def _artists_from_metadata(metadata: dict[str, Any]) -> list[str]:
     return [str(artist).strip()] if str(artist or "").strip() else []
 
 
+def _analysis_bpms(analysis: dict[str, Any]) -> tuple[float | None, float | None]:
+    bpm = _first_number(
+        analysis.get("all_in_one_bpm"),
+        analysis.get("tempo_bpm"),
+        analysis.get("tempo"),
+        analysis.get("bpm"),
+        _nested_value(analysis.get("bpm"), "all_in_one"),
+        _nested_value(analysis.get("bpm"), "value"),
+        _nested_value(analysis.get("tempo"), "bpm"),
+    )
+    beat_bpm = _first_number(
+        analysis.get("beat_analysis_bpm"),
+        analysis.get("beat_bpm"),
+        _nested_value(analysis.get("bpm"), "beat_analysis"),
+        _nested_value(analysis.get("beats"), "bpm"),
+        _estimate_bpm_from_beats(analysis.get("beat_positions") or analysis.get("beats")),
+    )
+    return bpm or beat_bpm, beat_bpm or bpm
+
+
+def _analysis_key(analysis: dict[str, Any], metadata: dict[str, Any]) -> str:
+    for value in (
+        analysis.get("key"),
+        analysis.get("detected_key"),
+        analysis.get("musical_key"),
+        _nested_value(analysis.get("key"), "name"),
+        _nested_value(analysis.get("key"), "value"),
+        metadata.get("key"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _nested_value(value: Any, key: str) -> Any:
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def _first_number(*values: Any) -> float | None:
+    for value in values:
+        number = _number_or_none(value)
+        if number is not None and number > 0:
+            return number
+    return None
+
+
+def _estimate_bpm_from_beats(value: Any) -> float | None:
+    if not isinstance(value, list) or len(value) < 3:
+        return None
+    positions = []
+    for item in value:
+        if isinstance(item, dict):
+            item = item.get("time") or item.get("start") or item.get("position")
+        number = _number_or_none(item)
+        if number is not None:
+            positions.append(number)
+    if len(positions) < 3:
+        return None
+    intervals = [
+        positions[index + 1] - positions[index]
+        for index in range(len(positions) - 1)
+        if positions[index + 1] > positions[index]
+    ]
+    if not intervals:
+        return None
+    average_interval = sum(intervals) / len(intervals)
+    if average_interval <= 0:
+        return None
+    bpm = 60.0 / average_interval
+    while bpm < 70:
+        bpm *= 2
+    while bpm > 210:
+        bpm /= 2
+    return round(bpm, 3)
+
+
 def _analysis_payload(job: JobRecord, *, status: str) -> dict[str, Any]:
+    analysis = job.artifacts.get("analysis") or {}
+    all_in_one_bpm, beat_analysis_bpm = _analysis_bpms(analysis)
     return {
-        "analysis": job.artifacts.get("analysis") or {},
+        "analysis": analysis,
         "gpu_ingestion": {
             "job_id": job.id,
             "job_type": job.job_type.value,
+            "identity_key": identity_key_from_artifacts(job.artifacts, job.payload),
             "source": job.artifacts.get("source"),
             "youtube_url": job.artifacts.get("youtube_url"),
+            "source_audio_url": job.artifacts.get("source_audio_url"),
+            "source_audio_upload_error": job.artifacts.get("source_audio_upload_error"),
+            "analyzer_result_url": job.artifacts.get("analyzer_result_url"),
+            "existing_library_song_id": job.artifacts.get("existing_library_song_id"),
+            "spotify_metadata": job.artifacts.get("spotify_metadata"),
+            "youtube_match": job.artifacts.get("youtube_match"),
+            "summary": {
+                "all_in_one_bpm": all_in_one_bpm,
+                "beat_analysis_bpm": beat_analysis_bpm,
+                "bpm": all_in_one_bpm or beat_analysis_bpm,
+                "key": _analysis_key(analysis, job.artifacts.get("spotify_metadata") or {}),
+                "segment_count": len(analysis.get("segments") or []),
+                "duration": _number_or_none(analysis.get("duration")),
+            },
             "status": status,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },

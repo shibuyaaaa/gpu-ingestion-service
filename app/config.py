@@ -85,6 +85,8 @@ class Settings:
     gcs_segment_upload_url_cache_max_entries: int = _int_env("GCS_SEGMENT_UPLOAD_URL_CACHE_MAX_ENTRIES", 10000)
     gcs_segment_upload_disk_cache_enabled: bool = _bool_env("GCS_SEGMENT_UPLOAD_DISK_CACHE_ENABLED", True)
     gcs_segment_upload_disk_cache_path: str = os.getenv("GCS_SEGMENT_UPLOAD_DISK_CACHE_PATH", "").strip()
+    source_audio_upload_enabled: bool = _bool_env("SOURCE_AUDIO_UPLOAD_ENABLED", True)
+    analyzer_result_upload_enabled: bool = _bool_env("ANALYZER_RESULT_UPLOAD_ENABLED", True)
     start_workers: bool = _bool_env("START_WORKERS", True)
     dry_run_mode: bool = _bool_env("DRY_RUN_MODE", False)
     model_backend: str = os.getenv("MODEL_BACKEND", "local").strip().lower()

@@ -33,6 +33,40 @@ PLAYABLE_FULL_SONG_EXISTS_CLAUSE = """
     )
 """
 
+PUBLISHED_STEM_EXISTS_CLAUSE = """
+    EXISTS (
+        SELECT 1
+        FROM stems st_any
+        WHERE st_any.song_id = s.id
+          AND COALESCE(st_any.audio_url, '') <> ''
+    )
+"""
+
+GPU_INGESTION_COMPLETE_CLAUSE = """
+    (
+        COALESCE(s.analysis_json::text, '') LIKE '%"status": "complete"%'
+        OR COALESCE(s.analysis_json::text, '') LIKE '%"status":"complete"%'
+    )
+"""
+
+LIBRARY_MEMBERSHIP_EXISTS_CLAUSE = f"""
+    (
+        {PLAYABLE_FULL_SONG_EXISTS_CLAUSE}
+        OR {PUBLISHED_STEM_EXISTS_CLAUSE}
+    )
+"""
+
+LIBRARY_INGESTION_STATUS_SQL = f"""
+    CASE
+        WHEN {PLAYABLE_FULL_SONG_EXISTS_CLAUSE}
+          OR {GPU_INGESTION_COMPLETE_CLAUSE}
+        THEN 'complete'
+        WHEN {PUBLISHED_STEM_EXISTS_CLAUSE}
+        THEN 'partial'
+        ELSE 'none'
+    END AS ingestion_status
+"""
+
 
 @dataclass(frozen=True)
 class LibrarySong:
@@ -41,6 +75,7 @@ class LibrarySong:
     artists: list[str]
     artist: str
     match_score: int | None = None
+    ingestion_status: str = "complete"
     metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,6 +85,7 @@ class LibrarySong:
             "artist": self.artist,
             "artists": self.artists,
             "match_score": self.match_score,
+            "ingestion_status": self.ingestion_status,
             **(self.metadata or {}),
         }
 
@@ -62,10 +98,20 @@ class LibraryLookupResult:
     source: str = "disabled"
     error: str | None = None
 
+    @property
+    def ingestion_status(self) -> str | None:
+        return self.song.ingestion_status if self.song else None
+
+    @property
+    def is_complete(self) -> bool:
+        return self.exists and (self.ingestion_status or "complete") == "complete"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "checked": self.checked,
             "exists": self.exists,
+            "ingestion_status": self.ingestion_status,
+            "is_complete": self.is_complete,
             "source": self.source,
             "error": self.error,
             "song": self.song.to_dict() if self.song else None,
@@ -182,6 +228,7 @@ class LibraryMembershipChecker:
                 s.key,
                 s.genre,
                 s.cover_art_url,
+                {LIBRARY_INGESTION_STATUS_SQL},
                 COALESCE(
                     array_agg(DISTINCT a.name) FILTER (WHERE a.name IS NOT NULL),
                     ARRAY[]::text[]
@@ -189,7 +236,7 @@ class LibraryMembershipChecker:
             FROM songs s
             LEFT JOIN song_artists sa ON s.id = sa.song_id
             LEFT JOIN artists a ON sa.artist_id = a.id
-            WHERE {PLAYABLE_FULL_SONG_EXISTS_CLAUSE}
+            WHERE {LIBRARY_MEMBERSHIP_EXISTS_CLAUSE}
             GROUP BY s.id
             ORDER BY s.created_at DESC
             """
@@ -225,6 +272,7 @@ class LibraryMembershipChecker:
                 s.key,
                 s.genre,
                 s.cover_art_url,
+                {LIBRARY_INGESTION_STATUS_SQL},
                 COALESCE(
                     array_agg(DISTINCT a.name) FILTER (WHERE a.name IS NOT NULL),
                     ARRAY[]::text[]
@@ -232,7 +280,7 @@ class LibraryMembershipChecker:
             FROM songs s
             LEFT JOIN song_artists sa ON s.id = sa.song_id
             LEFT JOIN artists a ON sa.artist_id = a.id
-            WHERE {PLAYABLE_FULL_SONG_EXISTS_CLAUSE}
+            WHERE {LIBRARY_MEMBERSHIP_EXISTS_CLAUSE}
               AND (
                 LOWER(s.title) LIKE $1
                 OR EXISTS (
@@ -272,10 +320,22 @@ class LibraryMembershipChecker:
         if self._catalog is None:
             return
         normalized_title = normalize_search_text(song.title)
-        if all(existing.id != song.id for existing in self._catalog):
+        replaced = False
+        for index, existing in enumerate(self._catalog):
+            if existing.id == song.id:
+                self._catalog[index] = song
+                replaced = True
+                break
+        if not replaced:
             self._catalog.append(song)
         bucket = self._catalog_by_title.setdefault(normalized_title, [])
-        if all(existing.id != song.id for existing in bucket):
+        replaced = False
+        for index, existing in enumerate(bucket):
+            if existing.id == song.id:
+                bucket[index] = song
+                replaced = True
+                break
+        if not replaced:
             bucket.append(song)
 
     def _is_stale(self) -> bool:
@@ -354,12 +414,22 @@ def _song_from_row(row: Any) -> LibrarySong:
         title=str(row["title"] or ""),
         artists=artists,
         artist=artists[0] if artists else "",
+        ingestion_status=str(_row_value(row, "ingestion_status", "complete") or "complete"),
         metadata={
-            "key": row.get("key") if hasattr(row, "get") else row["key"],
-            "genre": row.get("genre") if hasattr(row, "get") else row["genre"],
-            "cover_art_url": row.get("cover_art_url") if hasattr(row, "get") else row["cover_art_url"],
+            "key": _row_value(row, "key"),
+            "genre": _row_value(row, "genre"),
+            "cover_art_url": _row_value(row, "cover_art_url"),
         },
     )
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
 
 
 def _score_song(song: LibrarySong, title: str, artist: str) -> LibrarySong:
@@ -387,5 +457,6 @@ def _score_song(song: LibrarySong, title: str, artist: str) -> LibrarySong:
         artists=song.artists,
         artist=song.artist,
         match_score=score,
+        ingestion_status=song.ingestion_status,
         metadata=song.metadata,
     )

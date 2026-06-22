@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from app.identity import ingestion_identity_key, safe_identity_part
 from app.jobs.base import JobAdapter, StageResult
 from app.jobs.context import JobContext
 from app.library_membership import LibraryLookupResult
@@ -92,7 +93,7 @@ class DissectAdapter(JobAdapter):
                 started = time.perf_counter()
                 library_result = await context.library.lookup(resolved.get("spotify_metadata"))
                 timings["library_precheck_seconds"] = round(time.perf_counter() - started, 6)
-            if library_result.exists:
+            if library_result.is_complete:
                 timings["download_total_seconds"] = round(time.perf_counter() - stage_started, 6)
                 return StageResult(
                     next_stage=None,
@@ -113,6 +114,7 @@ class DissectAdapter(JobAdapter):
                         },
                     },
                 )
+            existing_library_song_id = library_result.song.id if library_result.exists and library_result.song else None
             if resolved.get("youtube_url") and resolved.get("youtube_match"):
                 timings["youtube_match_seconds"] = 0.0
             else:
@@ -131,6 +133,8 @@ class DissectAdapter(JobAdapter):
                 audio_path = await download_youtube_audio(resolved["youtube_url"], work_dir)
                 timings["youtube_download_seconds"] = round(time.perf_counter() - started, 6)
                 source_path = Path(audio_path)
+        if context.settings.dry_run_mode:
+            existing_library_song_id = None
 
         if source_path.suffix.lower() in {".wav", ".wave"}:
             if source_path != wav_path:
@@ -143,6 +147,34 @@ class DissectAdapter(JobAdapter):
             started = time.perf_counter()
             await AudioOps.convert_to_wav(source_path, wav_path)
             timings["wav_convert_seconds"] = round(time.perf_counter() - started, 6)
+        identity_key = ingestion_identity_key(
+            source=source,
+            youtube_url=resolved.get("youtube_url"),
+            youtube_match=resolved.get("youtube_match") if isinstance(resolved.get("youtube_match"), dict) else None,
+            spotify_metadata=(
+                resolved.get("spotify_metadata") if isinstance(resolved.get("spotify_metadata"), dict) else None
+            ),
+        )
+        source_audio_url = None
+        source_audio_upload_error = None
+        if (
+            not context.settings.dry_run_mode
+            and context.settings.source_audio_upload_enabled
+            and not _truthy_payload_flag(job, "skip_library_write")
+        ):
+            try:
+                started = time.perf_counter()
+                source_audio_url = await self._upload_source_audio(
+                    wav_path=wav_path,
+                    work_dir=work_dir,
+                    identity_key=identity_key,
+                    context=context,
+                    timings=timings,
+                )
+                timings["source_audio_upload_total_seconds"] = round(time.perf_counter() - started, 6)
+            except Exception as exc:
+                source_audio_upload_error = str(exc)[:1000]
+                timings["source_audio_upload_error"] = 1.0
         timings["download_total_seconds"] = round(time.perf_counter() - stage_started, 6)
 
         return StageResult(
@@ -152,15 +184,48 @@ class DissectAdapter(JobAdapter):
                 "source": source,
                 "source_path": str(source_path),
                 "audio_path": str(wav_path),
+                "source_audio_url": source_audio_url,
+                "source_audio_upload_error": source_audio_upload_error,
+                "ingestion_identity_key": identity_key,
                 "youtube_url": resolved.get("youtube_url"),
                 "spotify_metadata": resolved.get("spotify_metadata"),
                 "youtube_match": resolved.get("youtube_match"),
+                "existing_library_song_id": existing_library_song_id,
                 "library_precheck": library_result.to_dict() if not context.settings.dry_run_mode else None,
                 "download_timings": timings,
                 "skip_library_precheck": _truthy_payload_flag(job, "skip_library_precheck"),
                 "skip_library_write": _truthy_payload_flag(job, "skip_library_write"),
             },
         )
+
+    async def _upload_source_audio(
+        self,
+        *,
+        wav_path: Path,
+        work_dir: Path,
+        identity_key: str,
+        context: JobContext,
+        timings: dict[str, float],
+    ) -> str:
+        upload_path = f"gpu-ingestion/cache/source-audio/{safe_identity_part(identity_key)}/full.mp3"
+        exists_fn = getattr(context.gcs, "exists", None)
+        if exists_fn is not None:
+            started = time.perf_counter()
+            exists = await exists_fn(upload_path)
+            timings["source_audio_gcs_exists_seconds"] = round(time.perf_counter() - started, 6)
+            if exists:
+                timings["source_audio_gcs_cache_hit"] = 1.0
+                timings["source_audio_mp3_convert_seconds"] = 0.0
+                return f"{context.settings.cdn_base_url}/{upload_path}"
+
+        mp3_path = work_dir / "source-full.mp3"
+        started = time.perf_counter()
+        await AudioOps.convert_to_mp3(wav_path, mp3_path)
+        timings["source_audio_mp3_convert_seconds"] = round(time.perf_counter() - started, 6)
+        started = time.perf_counter()
+        url = await context.gcs.upload(mp3_path, upload_path, content_type="audio/mpeg")
+        timings["source_audio_gcs_upload_seconds"] = round(time.perf_counter() - started, 6)
+        return url
 
     async def _restore_or_create_cached_wav(
         self,
@@ -333,16 +398,36 @@ class DissectAdapter(JobAdapter):
         full_stem_paths = result.get("stem_paths") or result.get("full_stem_paths") or {}
         if not full_stem_paths and full_stem_urls and not context.settings.dry_run_mode:
             full_stem_paths = await self._download_full_stems(full_stem_urls, Path(job.artifacts["work_dir"]))
+        analyzer_result_url = result.get("analyzer_result_url")
+        if (
+            not analyzer_result_url
+            and not context.settings.dry_run_mode
+            and context.settings.analyzer_result_upload_enabled
+        ):
+            analyzer_result_path = result.get("analyzer_result_path")
+            if analyzer_result_path and Path(str(analyzer_result_path)).is_file():
+                try:
+                    analyzer_result_url = await context.gcs.upload(
+                        analyzer_result_path,
+                        f"gpu-ingestion/cache/analysis/{safe_identity_part(job.artifacts.get('ingestion_identity_key') or _analysis_cache_key(job.artifacts) or job.id)}/analyzer_result.json",
+                        content_type="application/json",
+                    )
+                except Exception as exc:
+                    analysis_timings["analyzer_result_upload_error"] = str(exc)[:1000]
         artifacts = {
             "analysis": analysis,
             "analysis_timings": analysis_timings,
             "analyzer_result_path": result.get("analyzer_result_path"),
-            "analyzer_result_url": result.get("analyzer_result_url"),
+            "analyzer_result_url": analyzer_result_url,
             "full_stem_urls": full_stem_urls,
             "full_stem_paths": full_stem_paths,
             "segments": segments,
             "chorus_segment": chorus_segment,
             "skip_segment_ids": job.artifacts.get("skip_segment_ids", []),
+            "source_audio_url": job.artifacts.get("source_audio_url"),
+            "source_audio_upload_error": job.artifacts.get("source_audio_upload_error"),
+            "ingestion_identity_key": job.artifacts.get("ingestion_identity_key"),
+            "existing_library_song_id": job.artifacts.get("existing_library_song_id"),
         }
         fanout_started = time.perf_counter()
         fanout = self._enqueue_analyzed_process_jobs(job, context, artifacts)
@@ -503,6 +588,13 @@ class DissectAdapter(JobAdapter):
             "source_path": job.artifacts.get("source_path"),
             "audio_path": job.artifacts["audio_path"],
             "youtube_url": job.artifacts.get("youtube_url"),
+            "source_audio_url": job.artifacts.get("source_audio_url") or artifacts.get("source_audio_url"),
+            "source_audio_upload_error": job.artifacts.get("source_audio_upload_error")
+            or artifacts.get("source_audio_upload_error"),
+            "ingestion_identity_key": job.artifacts.get("ingestion_identity_key")
+            or artifacts.get("ingestion_identity_key"),
+            "existing_library_song_id": job.artifacts.get("existing_library_song_id")
+            or artifacts.get("existing_library_song_id"),
             "spotify_metadata": job.artifacts.get("spotify_metadata"),
             "youtube_match": job.artifacts.get("youtube_match"),
             "analyzer_result_path": artifacts.get("analyzer_result_path"),
@@ -1244,6 +1336,10 @@ class QuickDissectAdapter(DissectAdapter):
                 "source_path": job.artifacts.get("source_path"),
                 "audio_path": job.artifacts["audio_path"],
                 "youtube_url": job.artifacts.get("youtube_url"),
+                "source_audio_url": job.artifacts.get("source_audio_url"),
+                "source_audio_upload_error": job.artifacts.get("source_audio_upload_error"),
+                "ingestion_identity_key": job.artifacts.get("ingestion_identity_key"),
+                "existing_library_song_id": job.artifacts.get("existing_library_song_id"),
                 "spotify_metadata": job.artifacts.get("spotify_metadata"),
                 "youtube_match": job.artifacts.get("youtube_match"),
                 "analysis": job.artifacts.get("analysis", {}),
