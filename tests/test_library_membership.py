@@ -227,6 +227,8 @@ async def test_library_writer_locks_song_identity_and_writes_source_audio_and_bp
     stem_lookup_queries = [query for query in conn.fetchrow_queries if "FROM stems" in query]
     assert stem_lookup_queries
     assert "ROUND(COALESCE(start_time, -1)::numeric, 3)" in stem_lookup_queries[0]
+    assert "ROUND(COALESCE($4::numeric, -1), 3)" in stem_lookup_queries[0]
+    assert "ROUND(COALESCE($5::numeric, -1), 3)" in stem_lookup_queries[0]
 
 
 class FakeDB:
