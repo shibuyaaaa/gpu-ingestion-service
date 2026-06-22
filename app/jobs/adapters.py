@@ -2140,6 +2140,8 @@ def _minimal_youtube_resolved(source: str) -> dict[str, Any]:
             "album_art_lowres": None,
             "isrc": None,
             "popularity": 0,
+            "genre": "Music",
+            "genres": ["Music"],
             "query_only": True,
             "source_type": "youtube",
             "metadata_source": "skipped_for_direct_youtube_download",

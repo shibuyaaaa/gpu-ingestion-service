@@ -827,6 +827,8 @@ async def test_skip_library_precheck_direct_youtube_source_skips_metadata_probe(
         assert result.artifacts["youtube_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         assert result.artifacts["youtube_match"]["metadata_source"] == "skipped_for_direct_youtube_download"
         assert result.artifacts["spotify_metadata"]["metadata_source"] == "skipped_for_direct_youtube_download"
+        assert result.artifacts["spotify_metadata"]["genre"] == "Music"
+        assert result.artifacts["spotify_metadata"]["genres"] == ["Music"]
         assert result.artifacts["download_timings"]["source_metadata_seconds"] == 0.0
         assert result.artifacts["download_timings"]["library_precheck_seconds"] == 0.0
         assert result.artifacts["download_timings"]["youtube_match_seconds"] <= 0.001
