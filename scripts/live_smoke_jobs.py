@@ -61,15 +61,22 @@ def get_json(url: str) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
-def submit_job(base_url: str, *, job_id: str, job_type: str, source: str) -> dict[str, Any]:
-    return post_json(
-        f"{base_url}/jobs",
-        {
-            "job_id": job_id,
-            "job_type": job_type,
-            "source": source,
-        },
-    )
+def submit_job(
+    base_url: str,
+    *,
+    job_id: str,
+    job_type: str,
+    source: str,
+    force_processing: bool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "job_id": job_id,
+        "job_type": job_type,
+        "source": source,
+    }
+    if force_processing:
+        payload["skip_library_precheck"] = True
+    return post_json(f"{base_url}/jobs", payload)
 
 
 def terminal(job: dict[str, Any]) -> bool:
@@ -194,13 +201,26 @@ def main() -> None:
     parser.add_argument("--quick-source", required=True)
     parser.add_argument("--bulk-source", required=True)
     parser.add_argument("--job-prefix", default=f"live-smoke-{int(time.time())}")
+    parser.add_argument("--force-processing", action="store_true")
     args = parser.parse_args()
 
     quick_id = f"{args.job_prefix}-quick"
     bulk_id = f"{args.job_prefix}-bulk"
     submitted = [
-        submit_job(args.base_url, job_id=quick_id, job_type="quick_dissect", source=args.quick_source),
-        submit_job(args.base_url, job_id=bulk_id, job_type="bulk_dissect", source=args.bulk_source),
+        submit_job(
+            args.base_url,
+            job_id=quick_id,
+            job_type="quick_dissect",
+            source=args.quick_source,
+            force_processing=args.force_processing,
+        ),
+        submit_job(
+            args.base_url,
+            job_id=bulk_id,
+            job_type="bulk_dissect",
+            source=args.bulk_source,
+            force_processing=args.force_processing,
+        ),
     ]
     print(json.dumps({"submitted": submitted}, sort_keys=True), flush=True)
     quick_job = wait_job(args.base_url, quick_id, timeout_seconds=args.timeout_seconds)

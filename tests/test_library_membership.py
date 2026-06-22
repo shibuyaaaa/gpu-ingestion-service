@@ -108,6 +108,7 @@ async def test_library_writer_locks_song_identity_and_writes_source_audio_and_bp
     class FakeConn:
         def __init__(self):
             self.executed = []
+            self.fetchrow_queries = []
             self.song_insert_args = None
             self.stem_insert_args = None
 
@@ -119,6 +120,7 @@ async def test_library_writer_locks_song_identity_and_writes_source_audio_and_bp
             return "OK"
 
         async def fetchrow(self, query, *args):
+            self.fetchrow_queries.append(query)
             if "POSITION($1 IN COALESCE(analysis_json::text" in query:
                 return None
             if "WHERE youtube_url = $1" in query:
@@ -222,6 +224,9 @@ async def test_library_writer_locks_song_identity_and_writes_source_audio_and_bp
     assert conn.song_insert_args[5] == "https://cdn.test/full.mp3"
     assert conn.stem_insert_args[1] == "chord"
     assert conn.stem_insert_args[2] == "https://cdn.test/chord.mp3"
+    stem_lookup_queries = [query for query in conn.fetchrow_queries if "FROM stems" in query]
+    assert stem_lookup_queries
+    assert "ROUND(COALESCE(start_time, -1)::numeric, 3)" in stem_lookup_queries[0]
 
 
 class FakeDB:

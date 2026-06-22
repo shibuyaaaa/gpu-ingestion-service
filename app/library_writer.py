@@ -295,8 +295,8 @@ class LibraryWriter:
             WHERE song_id = $1
               AND stem_type = $2
               AND segment = $3
-              AND ABS(COALESCE(start_time, -1) - COALESCE($4, -1)) < 0.001
-              AND ABS(COALESCE(end_time, -1) - COALESCE($5, -1)) < 0.001
+              AND ROUND(COALESCE(start_time, -1)::numeric, 3) = ROUND(COALESCE($4, -1)::numeric, 3)
+              AND ROUND(COALESCE(end_time, -1)::numeric, 3) = ROUND(COALESCE($5, -1)::numeric, 3)
             LIMIT 1
             """,
             song_id,
