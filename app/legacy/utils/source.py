@@ -50,6 +50,8 @@ async def resolve_source_metadata(source: str) -> dict[str, Any]:
                 "album_art_lowres": youtube_match.get("thumbnail"),
                 "isrc": None,
                 "popularity": 0,
+                "genre": youtube_match.get("genre") or "",
+                "genres": youtube_match.get("categories") or [],
                 "query_only": True,
                 "source_type": "youtube",
             },
@@ -187,6 +189,9 @@ async def get_youtube_metadata(youtube_url: str) -> dict[str, Any]:
         "duration_seconds": data.get("duration"),
         "url": data.get("webpage_url") or f"https://www.youtube.com/watch?v={video_id}",
         "thumbnail": data.get("thumbnail"),
+        "genre": data.get("genre") or _first_text(data.get("categories")),
+        "categories": data.get("categories") or [],
+        "tags": data.get("tags") or [],
     }
 
 
@@ -424,6 +429,15 @@ def _spotify_artist_genres_from_track(track: dict[str, Any]) -> list[str]:
             if text and text not in genres:
                 genres.append(text)
     return genres
+
+
+def _first_text(value: Any) -> str:
+    if isinstance(value, list):
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                return text
+    return ""
 
 
 async def _find_youtube_match(track: dict[str, Any], *, max_results: int) -> dict[str, Any] | None:

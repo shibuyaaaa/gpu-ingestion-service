@@ -3,6 +3,7 @@ import pytest
 from app.jobs.adapters import BulkDissectAdapter
 from app.legacy.utils.source import (
     _artists_from_embed_html,
+    _first_text,
     _with_spotify_artist_genres,
     download_youtube_audio,
     extract_youtube_video_id,
@@ -49,6 +50,11 @@ def test_spotify_embed_artist_parser():
     html = '"artists":[{"name":"Bello\\u0026Dallas","uri":"spotify:artist:2zW"}]'
 
     assert _artists_from_embed_html(html) == ["Bello&Dallas"]
+
+
+def test_first_text_uses_first_non_empty_list_value():
+    assert _first_text(["", None, "Music"]) == "Music"
+    assert _first_text("Music") == ""
 
 
 @pytest.mark.asyncio
