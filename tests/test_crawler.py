@@ -1,7 +1,7 @@
 import tempfile
 from pathlib import Path
 
-from app.config import Settings
+from app.config import DEFAULT_CRAWLER_KWORB_CHART_URLS, Settings
 from app.crawler.kworb import parse_kworb_chart
 from app.crawler.ops import IngestionOpsUnavailable, JobTerminalState
 from app.crawler.runner import CrawlerRunner
@@ -82,6 +82,17 @@ def test_spotify_candidates_dedupe_and_sort_by_popularity_then_rank():
     assert sorted_candidates[-1].popularity == 80
 
 
+def test_default_crawler_sources_are_north_america_first_then_global():
+    assert DEFAULT_CRAWLER_KWORB_CHART_URLS == [
+        "https://kworb.net/spotify/country/us_daily.html",
+        "https://kworb.net/spotify/country/ca_daily.html",
+        "https://kworb.net/spotify/country/global_daily.html",
+    ]
+
+    settings = Settings()
+    assert settings.crawler_kworb_chart_urls == DEFAULT_CRAWLER_KWORB_CHART_URLS
+
+
 def test_kworb_chart_parser_extracts_spotify_track_ids():
     markup = """
     <tr><td class="np">5</td>
@@ -124,6 +135,44 @@ async def test_crawler_submits_batch_limit_and_skips_existing_library_songs():
             "spotify:track:3",
         ]
         assert store.get_active_session()["status"] == "waiting"
+
+
+async def test_crawler_submits_candidates_in_provider_source_order():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(tmp, batch_size=2)
+        store = CrawlerStore(Path(tmp) / "crawler.sqlite3")
+        provider = FakeProvider(
+            [
+                _candidate(
+                    "global-hit",
+                    popularity=100,
+                    rank=1,
+                    playlist_source="https://kworb.net/spotify/country/global_daily.html",
+                ),
+                _candidate(
+                    "canada-hit",
+                    popularity=65,
+                    rank=20,
+                    playlist_source="https://kworb.net/spotify/country/ca_daily.html",
+                ),
+            ]
+        )
+        publisher = FakePublisher()
+        runner = CrawlerRunner(
+            settings=settings,
+            store=store,
+            provider=provider,
+            publisher=publisher,
+            ops=FakeOps(),
+            library=FakeLibrary(),
+        )
+
+        await runner.run_once()
+
+        assert [payload["source"] for payload in publisher.payloads] == [
+            "spotify:track:global-hit",
+            "spotify:track:canada-hit",
+        ]
 
 
 async def test_crawler_completes_empty_session_when_no_publishable_candidates_found():
@@ -379,14 +428,20 @@ async def test_local_publish_failure_is_retryable_without_duplicating_successes(
         assert store.candidate_consumed("a") is True
 
 
-def _candidate(spotify_id: str, *, popularity: int, rank: int) -> ChartCandidate:
+def _candidate(
+    spotify_id: str,
+    *,
+    popularity: int,
+    rank: int,
+    playlist_source: str = "spotify:playlist:charts",
+) -> ChartCandidate:
     return ChartCandidate(
         spotify_id=spotify_id,
         title=f"Song {spotify_id}",
         artist="Artist",
         artists=["Artist"],
         popularity=popularity,
-        playlist_source="spotify:playlist:charts",
+        playlist_source=playlist_source,
         rank=rank,
     )
 

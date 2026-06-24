@@ -52,6 +52,13 @@ def _list_env(name: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+DEFAULT_CRAWLER_KWORB_CHART_URLS = [
+    "https://kworb.net/spotify/country/us_daily.html",
+    "https://kworb.net/spotify/country/ca_daily.html",
+    "https://kworb.net/spotify/country/global_daily.html",
+]
+
+
 @dataclass(frozen=True)
 class Settings:
     service_name: str = os.getenv("SERVICE_NAME", "gpu-ingestion-service")
@@ -130,7 +137,12 @@ class Settings:
     crawler_cpuset: str = os.getenv("CRAWLER_CPUSET", "3").strip()
     ingestion_cpuset: str = os.getenv("INGESTION_CPUSET", "0-2").strip()
     crawler_spotify_playlist_urls: list[str] = field(default_factory=lambda: _list_env("CRAWLER_SPOTIFY_PLAYLIST_URLS"))
-    crawler_kworb_chart_urls: list[str] = field(default_factory=lambda: _list_env("CRAWLER_KWORB_CHART_URLS"))
+    crawler_kworb_chart_urls: list[str] = field(
+        default_factory=lambda: (
+            _list_env("CRAWLER_KWORB_CHART_URLS")
+            or DEFAULT_CRAWLER_KWORB_CHART_URLS
+        )
+    )
     crawler_ingestion_url: str = os.getenv("CRAWLER_INGESTION_URL", "http://127.0.0.1:8080").rstrip("/")
     crawler_session_db_path: Path = Path(os.getenv("CRAWLER_SESSION_DB_PATH", "/var/lib/gpu-ingestion/crawler.sqlite3"))
     crawler_max_candidate_pages: int = _int_env("CRAWLER_MAX_CANDIDATE_PAGES", 10)
