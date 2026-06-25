@@ -6,11 +6,9 @@ import httpx
 
 from app.crawler.types import ChartCandidate
 
-KWORB_TRACK_RE = re.compile(
-    r'<tr><td class="np">(?P<rank>\d+)</td>.*?'
-    r'<td class="text mp"><div>(?P<title_cell>.*?)</div></td>',
-    re.DOTALL,
-)
+KWORB_ROW_RE = re.compile(r"<tr>(?P<row>.*?)</tr>", re.DOTALL)
+KWORB_TITLE_CELL_RE = re.compile(r'<td class="text mp"><div>(?P<title_cell>.*?)</div></td>', re.DOTALL)
+KWORB_DAILY_RANK_RE = re.compile(r'^\s*<td class="np">(?P<rank>\d+)</td>', re.DOTALL)
 ANCHOR_RE = re.compile(r'<a href="(?P<href>[^"]+)">(?P<label>.*?)</a>', re.DOTALL)
 SPOTIFY_TRACK_ID_RE = re.compile(r"/track/(?P<spotify_id>[A-Za-z0-9]+)\.html")
 
@@ -37,10 +35,17 @@ class KworbSpotifyChartClient:
 
 def parse_kworb_chart(markup: str, *, chart_url: str, rank_offset: int = 0) -> list[ChartCandidate]:
     candidates: list[ChartCandidate] = []
-    for match in KWORB_TRACK_RE.finditer(markup):
-        chart_rank = int(match.group("rank"))
+    chart_position = 0
+    for match in KWORB_ROW_RE.finditer(markup):
+        row = match.group("row")
+        title_match = KWORB_TITLE_CELL_RE.search(row)
+        if title_match is None:
+            continue
+        chart_position += 1
+        rank_match = KWORB_DAILY_RANK_RE.search(row)
+        chart_rank = int(rank_match.group("rank")) if rank_match else chart_position
         rank = rank_offset + chart_rank
-        anchors = list(ANCHOR_RE.finditer(match.group("title_cell")))
+        anchors = list(ANCHOR_RE.finditer(title_match.group("title_cell")))
         if len(anchors) < 2:
             continue
         track_anchor = anchors[-1]

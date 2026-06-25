@@ -116,7 +116,7 @@ run with `DRY_RUN_MODE=false`.
 - `GCP_PROJECT_ID`, `GCP_BUCKET_NAME`, `CDN_BASE_URL`: GCP output config.
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`: required for Spotify link/name resolution.
 - `CRAWLER_INGESTION_URL`: VM-local ingestion API URL. Default: `http://127.0.0.1:8080`.
-- `CRAWLER_KWORB_CHART_URLS`: comma-separated chart sources. Defaults to US daily, Canada daily, then global daily so the autonomous crawler fills popular North American songs first and uses the global chart as fallback inventory.
+- `CRAWLER_KWORB_CHART_URLS`: comma-separated chart sources. Defaults to US, Canada, and global daily totals first, then current daily charts, so the autonomous crawler prioritizes durable popular songs with long chart history before falling back to current chart inventory.
 - `GPU_DEVICE`: CUDA device string. Default: `cuda:0`.
 
 ## Queue Choice

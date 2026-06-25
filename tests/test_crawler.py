@@ -84,6 +84,9 @@ def test_spotify_candidates_dedupe_and_sort_by_popularity_then_rank():
 
 def test_default_crawler_sources_are_north_america_first_then_global():
     assert DEFAULT_CRAWLER_KWORB_CHART_URLS == [
+        "https://kworb.net/spotify/country/us_daily_totals.html",
+        "https://kworb.net/spotify/country/ca_daily_totals.html",
+        "https://kworb.net/spotify/country/global_daily_totals.html",
         "https://kworb.net/spotify/country/us_daily.html",
         "https://kworb.net/spotify/country/ca_daily.html",
         "https://kworb.net/spotify/country/global_daily.html",
@@ -109,6 +112,30 @@ def test_kworb_chart_parser_extracts_spotify_track_ids():
     assert candidates[0].title == "Choosin' Texas"
     assert candidates[0].artist == "Ella Langley"
     assert candidates[0].rank == 5
+
+
+def test_kworb_chart_parser_extracts_totals_rows_by_row_order():
+    markup = """
+    <tr>
+    <td class="text mp"><div><a href="../artist/6l3HvQ5sa6mXTsMTB19rO5.html">J. Cole</a> - <a href="../track/68Dni7IE4VyPkTOH9mRWHr.html">No Role Modelz</a></div></td>
+    <td>3741</td><td>6</td><td>7</td><td class="np mini text"></td>
+    <td>870,221</td><td>1,314,359,563</td></tr>
+    <tr>
+    <td class="text mp"><div><a href="../artist/246dkjvS1zLTtiykXe5h60.html">Post Malone</a> - <a href="../track/0RiRZpuVRbi7oqRdSMwhQY.html">Sunflower - Spider-Man: Into the Spider-Verse</a></div></td>
+    <td>2271</td><td>302</td><td>1</td><td class="np mini text">(x29)</td>
+    <td>2,118,242</td><td>1,187,489,400</td></tr>
+    """
+
+    candidates = parse_kworb_chart(markup, chart_url="https://kworb.net/spotify/country/us_daily_totals.html")
+
+    assert [candidate.spotify_id for candidate in candidates] == [
+        "68Dni7IE4VyPkTOH9mRWHr",
+        "0RiRZpuVRbi7oqRdSMwhQY",
+    ]
+    assert candidates[0].title == "No Role Modelz"
+    assert candidates[0].artist == "J. Cole"
+    assert candidates[0].rank == 1
+    assert candidates[1].rank == 2
 
 
 async def test_crawler_submits_batch_limit_and_skips_existing_library_songs():

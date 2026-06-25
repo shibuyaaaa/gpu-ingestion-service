@@ -53,6 +53,9 @@ def _list_env(name: str) -> list[str]:
 
 
 DEFAULT_CRAWLER_KWORB_CHART_URLS = [
+    "https://kworb.net/spotify/country/us_daily_totals.html",
+    "https://kworb.net/spotify/country/ca_daily_totals.html",
+    "https://kworb.net/spotify/country/global_daily_totals.html",
     "https://kworb.net/spotify/country/us_daily.html",
     "https://kworb.net/spotify/country/ca_daily.html",
     "https://kworb.net/spotify/country/global_daily.html",
