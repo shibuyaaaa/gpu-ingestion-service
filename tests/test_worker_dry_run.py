@@ -16,7 +16,7 @@ from app.legacy.utils.source import _yt_dlp_js_args
 from app.legacy.utils import GCSClient
 from app.models import ModelRuntimeBundle
 from app.queue import JobStage, JobStatus, JobStore, JobType
-from app.workers import WorkerManager
+from app.workers.manager import WorkerManager, WorkerState
 
 
 def test_segment_normalization_skips_short_boundary_segments():
@@ -74,6 +74,41 @@ def test_worker_uses_short_retry_delay_for_download_failures():
         assert manager.state()["scheduling"]["worker_poll_seconds"] == settings.worker_poll_seconds
 
 
+def test_worker_watchdog_reports_overdue_active_jobs():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        settings = Settings(
+            queue_db_path=root / "queue.sqlite3",
+            work_dir=root / "work",
+            job_lease_timeout_seconds=30,
+            start_workers=False,
+        )
+        manager = WorkerManager(context=SimpleNamespace(settings=settings), registry=None)
+        state = WorkerState(
+            worker_id="test-host:gpu-0:abc123",
+            stages=[JobStage.ANALYZE],
+            batch_size=1,
+            claim_mode="gpu",
+        )
+        manager._states[state.worker_id] = state
+        state.active_job_ids.append("stuck-job")
+        state.active_job_started_at["stuck-job"] = 100.0
+
+        overdue = manager._overdue_active_jobs(now=131.0)
+        manager_state = manager.state()
+
+        assert overdue == [
+            {
+                "worker_id": state.worker_id,
+                "job_id": "stuck-job",
+                "age_seconds": 31.0,
+                "timeout_seconds": 30.0,
+            }
+        ]
+        assert manager_state["job_watchdog"]["enabled"] is True
+        assert manager_state["job_watchdog"]["overdue_active_jobs"][0]["job_id"] == "stuck-job"
+
+
 async def test_worker_reconciles_parent_only_when_fanout_maybe_complete():
     class FakeAdapter:
         def __init__(self, *, fanout_maybe_complete: bool):
@@ -119,7 +154,11 @@ async def test_worker_reconciles_parent_only_when_fanout_maybe_complete():
 
         store.reconcile_failed_fanout_parent = fake_reconcile
         context = SimpleNamespace(settings=settings, store=store)
-        state = SimpleNamespace(active_job_ids=[], processed=0, failures=0, last_error=None)
+        state = WorkerState(
+            worker_id="process-worker",
+            stages=[JobStage.PROCESS],
+            batch_size=1,
+        )
 
         manager = WorkerManager(context=context, registry=FakeRegistry(FakeAdapter(fanout_maybe_complete=False)))
         await manager._process_job_stage(claimed, state)

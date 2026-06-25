@@ -24,6 +24,7 @@ class WorkerState:
     batch_size: int
     claim_mode: str = "stages"
     active_job_ids: list[str] = None
+    active_job_started_at: dict[str, float] = None
     processed: int = 0
     failures: int = 0
     last_error: str | None = None
@@ -31,14 +32,21 @@ class WorkerState:
     def __post_init__(self) -> None:
         if self.active_job_ids is None:
             self.active_job_ids = []
+        if self.active_job_started_at is None:
+            self.active_job_started_at = {}
 
     def to_dict(self) -> dict[str, Any]:
+        now = time.time()
         return {
             "worker_id": self.worker_id,
             "stages": [stage.value for stage in self.stages],
             "batch_size": self.batch_size,
             "claim_mode": self.claim_mode,
             "active_job_ids": self.active_job_ids,
+            "active_job_ages_seconds": {
+                job_id: round(max(0.0, now - started_at), 3)
+                for job_id, started_at in self.active_job_started_at.items()
+            },
             "processed": self.processed,
             "failures": self.failures,
             "last_error": self.last_error,
@@ -69,6 +77,13 @@ class WorkerManager:
             "last_error": None,
             "restart_threshold": context.settings.gpu_health_restart_failures,
         }
+        self._job_watchdog_state: dict[str, Any] = {
+            "enabled": context.settings.job_lease_timeout_seconds > 0,
+            "checks": 0,
+            "last_check_at": None,
+            "last_error": None,
+            "timeout_seconds": context.settings.job_lease_timeout_seconds,
+        }
 
     async def start(self) -> None:
         if self._tasks:
@@ -93,6 +108,8 @@ class WorkerManager:
             self._tasks.append(asyncio.create_task(self._cleanup_loop(), name="work-dir-cleanup"))
         if self._gpu_health_state["enabled"]:
             self._tasks.append(asyncio.create_task(self._gpu_health_loop(), name="gpu-health"))
+        if self._job_watchdog_state["enabled"]:
+            self._tasks.append(asyncio.create_task(self._job_watchdog_loop(), name="job-watchdog"))
         logger.info("started %d local workers", len(self._tasks))
 
     async def stop(self) -> None:
@@ -144,6 +161,7 @@ class WorkerManager:
 
     async def _process_job_stage(self, job: JobRecord, state: WorkerState) -> None:
         state.active_job_ids.append(job.id)
+        state.active_job_started_at[job.id] = time.time()
         adapter = self.registry.get(job.job_type)
         try:
             result = await adapter.run_stage(job, self.context)
@@ -169,6 +187,7 @@ class WorkerManager:
             state.last_error = str(exc)
         finally:
             state.active_job_ids = [job_id for job_id in state.active_job_ids if job_id != job.id]
+            state.active_job_started_at.pop(job.id, None)
 
     def _retry_delay_seconds(self, job: JobRecord) -> int:
         if job.stage == JobStage.DOWNLOAD:
@@ -246,6 +265,47 @@ class WorkerManager:
                 logger.critical("exiting process so systemd can refresh container GPU runtime")
                 os._exit(75)
 
+    async def _job_watchdog_loop(self) -> None:
+        timeout = max(1.0, float(self.context.settings.job_lease_timeout_seconds))
+        interval = min(60.0, max(5.0, timeout / 6.0))
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                continue
+            except asyncio.TimeoutError:
+                pass
+            self._job_watchdog_state["checks"] += 1
+            self._job_watchdog_state["last_check_at"] = time.time()
+            overdue = self._overdue_active_jobs(now=self._job_watchdog_state["last_check_at"])
+            if not overdue:
+                self._job_watchdog_state["last_error"] = None
+                continue
+            self._job_watchdog_state["last_error"] = f"{len(overdue)} active job(s) exceeded lease timeout"
+            logger.critical(
+                "exiting process because active job exceeded lease timeout: %s",
+                overdue,
+            )
+            os._exit(76)
+
+    def _overdue_active_jobs(self, *, now: float | None = None) -> list[dict[str, Any]]:
+        current_time = time.time() if now is None else now
+        timeout = max(1.0, float(self.context.settings.job_lease_timeout_seconds))
+        overdue: list[dict[str, Any]] = []
+        for state in self._states.values():
+            for job_id, started_at in state.active_job_started_at.items():
+                age = max(0.0, current_time - started_at)
+                if age <= timeout:
+                    continue
+                overdue.append(
+                    {
+                        "worker_id": state.worker_id,
+                        "job_id": job_id,
+                        "age_seconds": round(age, 3),
+                        "timeout_seconds": timeout,
+                    }
+                )
+        return overdue
+
     def _cleanup_path_allowed(self, path: Path) -> bool:
         try:
             resolved = path.resolve()
@@ -266,6 +326,10 @@ class WorkerManager:
                 "min_age_seconds": self.context.settings.work_dir_cleanup_min_age_seconds,
             },
             "gpu_health": self._gpu_health_state,
+            "job_watchdog": {
+                **self._job_watchdog_state,
+                "overdue_active_jobs": self._overdue_active_jobs(),
+            },
             "scheduling": {
                 "download_workers": self.context.settings.download_workers,
                 "download_batch_size": self.context.settings.download_batch_size,
