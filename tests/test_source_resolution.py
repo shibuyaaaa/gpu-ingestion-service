@@ -1,5 +1,6 @@
 import pytest
 
+import app.legacy.utils.source as source_module
 from app.jobs.adapters import BulkDissectAdapter
 from app.jobs.adapters import (
     _enrich_payload_spotify_metadata_if_needed,
@@ -255,6 +256,58 @@ async def test_download_youtube_audio_retries_transient_yt_dlp_error(monkeypatch
     assert len(calls) == 2
     assert sleeps == [0.5]
     assert not (tmp_path / "source.part").exists()
+
+
+@pytest.mark.asyncio
+async def test_download_youtube_audio_passes_configured_cookies(monkeypatch, tmp_path):
+    calls = []
+    cookies_path = tmp_path / "cookies.txt"
+    cookies_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            (tmp_path / "source.wav").write_bytes(b"audio")
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*cmd, stdout, stderr):
+        calls.append(cmd)
+        return FakeProc()
+
+    monkeypatch.setenv("YTDLP_COOKIES_PATH", str(cookies_path))
+    monkeypatch.setattr("app.legacy.utils.source.shutil.which", lambda binary: "/usr/bin/yt-dlp")
+    monkeypatch.setattr("app.legacy.utils.source.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await download_youtube_audio("https://www.youtube.com/watch?v=dQw4w9WgXcQ", tmp_path)
+
+    assert result == str(tmp_path / "source.wav")
+    assert "--cookies" in calls[0]
+    assert calls[0][calls[0].index("--cookies") + 1] == str(cookies_path)
+
+
+def test_yt_dlp_common_args_writes_current_payload_cookies(monkeypatch, tmp_path):
+    source_module._youtube_token_cache = None
+    source_module._youtube_token_cache_time = None
+    source_module._youtube_cookies_path = None
+    source_module._youtube_cookies_cache_time = None
+
+    monkeypatch.setattr("app.legacy.utils.source.shutil.which", lambda binary: None)
+    monkeypatch.setattr("app.legacy.utils.source.tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        "app.legacy.utils.source._download_youtube_gcs_text",
+        lambda blob_path: '{"cookies":[{"domain":".youtube.com","path":"/","secure":true,"expires":-1,"name":"SAPISID","value":"secret"}]}'
+        if blob_path == "yt-tokens/current.json"
+        else None,
+    )
+
+    args = source_module._yt_dlp_common_args()
+
+    cookies_path = tmp_path / "yt_cookies_from_current.txt"
+    assert args == ["--cookies", str(cookies_path)]
+    content = cookies_path.read_text(encoding="utf-8")
+    assert ".youtube.com\tTRUE\t/\tTRUE\t" in content
+    assert "SAPISID\tsecret" in content
 
 
 @pytest.mark.asyncio

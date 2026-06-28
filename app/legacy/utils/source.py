@@ -4,7 +4,9 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,10 @@ TRANSIENT_YTDLP_ERROR_RE = re.compile(
 _spotify_access_token: str | None = None
 _spotify_token_expires_at = 0.0
 _spotify_request_lock = asyncio.Lock()
+_youtube_token_cache: dict[str, Any] | None = None
+_youtube_token_cache_time: datetime | None = None
+_youtube_cookies_path: str | None = None
+_youtube_cookies_cache_time: datetime | None = None
 
 
 async def resolve_spotify_source(source: str, *, max_youtube_results: int = 5) -> dict[str, Any]:
@@ -100,7 +106,7 @@ async def download_youtube_audio(youtube_url: str, output_dir: str | Path) -> st
         _remove_partial_ytdlp_outputs(output)
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp",
-            *_yt_dlp_js_args(),
+            *_yt_dlp_common_args(),
             "-x",
             "--audio-format",
             "wav",
@@ -169,7 +175,7 @@ async def get_youtube_metadata(youtube_url: str) -> dict[str, Any]:
         raise RuntimeError("yt-dlp is not installed")
     proc = await asyncio.create_subprocess_exec(
         "yt-dlp",
-        *_yt_dlp_js_args(),
+        *_yt_dlp_common_args(),
         "--dump-json",
         "--no-download",
         "--no-warnings",
@@ -474,7 +480,7 @@ async def _search_youtube(query: str, *, max_results: int) -> list[dict[str, Any
         raise RuntimeError("yt-dlp is not installed")
     proc = await asyncio.create_subprocess_exec(
         "yt-dlp",
-        *_yt_dlp_js_args(),
+        *_yt_dlp_common_args(),
         f"ytsearch{max_results}:{query}",
         "--dump-json",
         "--no-download",
@@ -498,6 +504,14 @@ async def _search_youtube(query: str, *, max_results: int) -> list[dict[str, Any
     return results
 
 
+def _yt_dlp_common_args() -> list[str]:
+    args = _yt_dlp_js_args()
+    cookies_path = _get_youtube_cookies_path()
+    if cookies_path:
+        args.extend(["--cookies", cookies_path])
+    return args
+
+
 def _yt_dlp_js_args() -> list[str]:
     deno = shutil.which("deno")
     if deno:
@@ -506,6 +520,115 @@ def _yt_dlp_js_args() -> list[str]:
     if node:
         return ["--js-runtimes", f"node:{node}", "--remote-components", "ejs:github"]
     return []
+
+
+def _get_youtube_cookies_path() -> str | None:
+    global _youtube_cookies_cache_time, _youtube_cookies_path
+
+    configured_path = (os.getenv("YTDLP_COOKIES_PATH") or os.getenv("YOUTUBE_COOKIES_PATH") or "").strip()
+    if configured_path:
+        if Path(configured_path).exists():
+            return configured_path
+        logger.warning("configured YouTube cookies path does not exist: %s", configured_path)
+
+    if _youtube_cookies_path and Path(_youtube_cookies_path).exists() and _cache_fresh(_youtube_cookies_cache_time):
+        return _youtube_cookies_path
+
+    payload = _load_youtube_token_payload()
+    cookies = payload.get("cookies") if isinstance(payload, dict) else None
+    if isinstance(cookies, list) and cookies:
+        path = Path(tempfile.gettempdir()) / "yt_cookies_from_current.txt"
+        _write_netscape_youtube_cookies(cookies, path)
+        _youtube_cookies_path = str(path)
+        _youtube_cookies_cache_time = datetime.utcnow()
+        logger.info("wrote YouTube cookies from current token payload")
+        return _youtube_cookies_path
+
+    cookie_blob = _download_youtube_gcs_text(os.getenv("YOUTUBE_COOKIES_GCS_PATH", "yt-tokens/cookies.txt"))
+    if cookie_blob:
+        path = Path(tempfile.gettempdir()) / "yt_cookies.txt"
+        path.write_text(cookie_blob, encoding="utf-8")
+        _youtube_cookies_path = str(path)
+        _youtube_cookies_cache_time = datetime.utcnow()
+        logger.info("downloaded YouTube cookies from GCS")
+        return _youtube_cookies_path
+
+    return None
+
+
+def _load_youtube_token_payload() -> dict[str, Any] | None:
+    global _youtube_token_cache, _youtube_token_cache_time
+
+    if _youtube_token_cache and _cache_fresh(_youtube_token_cache_time):
+        return _youtube_token_cache
+
+    token_text = _download_youtube_gcs_text(os.getenv("YOUTUBE_TOKEN_GCS_PATH", "yt-tokens/current.json"))
+    if not token_text:
+        return None
+    try:
+        payload = json.loads(token_text)
+    except json.JSONDecodeError:
+        logger.warning("YouTube token payload from GCS is not valid JSON")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    _youtube_token_cache = payload
+    _youtube_token_cache_time = datetime.utcnow()
+    return payload
+
+
+def _download_youtube_gcs_text(blob_path: str) -> str | None:
+    try:
+        from google.cloud import storage
+
+        project_id = os.getenv("GCP_PROJECT_ID", "imposing-kayak-422917-b0")
+        bucket_name = os.getenv("GCP_BUCKET_NAME", "shibuya-assets")
+        client = storage.Client(project=project_id)
+        blob = client.bucket(bucket_name).blob(blob_path)
+        if not blob.exists():
+            return None
+        return blob.download_as_text()
+    except Exception as exc:
+        logger.warning("failed to load YouTube auth blob %s from GCS: %s", blob_path, exc)
+        return None
+
+
+def _write_netscape_youtube_cookies(cookies: list[Any], path: Path) -> None:
+    far_future = int(time.time()) + 365 * 24 * 60 * 60
+    lines = ["# Netscape HTTP Cookie File"]
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        domain = str(cookie.get("domain") or "").strip()
+        name = str(cookie.get("name") or "")
+        value = str(cookie.get("value") or "")
+        if not domain or not name:
+            continue
+        expires = cookie.get("expires", 0)
+        try:
+            expires_int = int(expires)
+        except (TypeError, ValueError):
+            expires_int = 0
+        if expires_int <= 0:
+            expires_int = far_future
+        lines.append(
+            "\t".join(
+                [
+                    domain,
+                    "TRUE" if domain.startswith(".") else "FALSE",
+                    str(cookie.get("path") or "/"),
+                    "TRUE" if cookie.get("secure", False) else "FALSE",
+                    str(expires_int),
+                    name,
+                    value,
+                ]
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _cache_fresh(cache_time: datetime | None, *, minutes: int = 5) -> bool:
+    return bool(cache_time and datetime.utcnow() - cache_time < timedelta(minutes=minutes))
 
 
 def _is_youtube_match(result: dict[str, Any], *, artist: str, title: str, expected_duration: float) -> bool:
