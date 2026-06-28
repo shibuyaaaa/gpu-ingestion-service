@@ -142,10 +142,19 @@ class SpotifyTrackCache:
 async def _get_spotify_tracks(track_ids: list[str]) -> dict[str, dict[str, Any]]:
     if not track_ids:
         return {}
-    data = await _spotify_get_json(
-        "https://api.spotify.com/v1/tracks",
-        params={"ids": ",".join(track_ids[:50])},
-    )
+    try:
+        data = await _spotify_get_json(
+            "https://api.spotify.com/v1/tracks",
+            params={"ids": ",".join(track_ids[:50])},
+        )
+    except Exception:
+        if len(track_ids) == 1:
+            return {}
+        midpoint = max(1, len(track_ids) // 2)
+        return {
+            **await _get_spotify_tracks(track_ids[:midpoint]),
+            **await _get_spotify_tracks(track_ids[midpoint:]),
+        }
     tracks: dict[str, dict[str, Any]] = {}
     for track in data.get("tracks") or []:
         if not isinstance(track, dict) or not track.get("id"):
