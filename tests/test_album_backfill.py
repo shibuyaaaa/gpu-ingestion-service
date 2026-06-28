@@ -1,9 +1,11 @@
 from app.tools.album_backfill import (
     AlbumBackfillAction,
     SongAlbumSnapshot,
+    SpotifyTrackCache,
     _metadata_from_analysis,
     _spotify_id_from_song,
     plan_album_action,
+    trusted_spotify_ids,
     unique_album_count,
 )
 
@@ -74,3 +76,35 @@ async def test_album_backfill_can_skip_review_search_for_no_id_rows():
     assert action.source == "none"
     assert "review search skipped" in action.reason
     assert action.review_candidates == []
+
+
+def test_album_backfill_collects_and_dedupes_trusted_spotify_ids(tmp_path):
+    songs = [
+        SongAlbumSnapshot(
+            id="song-1",
+            title="Song 1",
+            artists=["Artist"],
+            analysis_json={"gpu_ingestion": {"spotify_metadata": {"spotify_id": "track-1"}}},
+        ),
+        SongAlbumSnapshot(
+            id="song-2",
+            title="Song 2",
+            artists=["Artist"],
+            analysis_json={"gpu_ingestion": {"spotify_metadata": {"spotify_id": "track-1"}}},
+        ),
+        SongAlbumSnapshot(
+            id="song-3",
+            title="Song 3",
+            artists=["Artist"],
+            analysis_json={
+                "gpu_ingestion": {
+                    "spotify_metadata": {"spotify_id": "track-2", "album_id": "album-2", "album": "Album"}
+                }
+            },
+        ),
+    ]
+    cache = SpotifyTrackCache(tmp_path / "cache.json")
+    cache.values["track-cached"] = {"spotify_id": "track-cached"}
+
+    assert trusted_spotify_ids(songs) == ["track-1", "track-1"]
+    assert cache.missing_ids(["track-1", "track-1", "track-cached", ""]) == ["track-1"]

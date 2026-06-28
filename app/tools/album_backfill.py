@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.legacy.utils.source import _format_spotify_track, _get_spotify_track, _search_spotify_tracks
+from app.legacy.utils.source import _format_spotify_track, _get_spotify_track, _search_spotify_tracks, _spotify_get_json
 from app.library_writer import upsert_song_album_metadata
 from app.tools.gcs_backfill import load_dotenv
 
@@ -112,9 +112,46 @@ class SpotifyTrackCache:
             self.flush()
         return dict(self.values[spotify_id])
 
+    async def preload(self, spotify_ids: list[str], *, batch_size: int = 50) -> None:
+        missing = self.missing_ids(spotify_ids)
+        if not missing:
+            return
+        for index in range(0, len(missing), batch_size):
+            batch = missing[index : index + batch_size]
+            fetched = await _get_spotify_tracks(batch)
+            for spotify_id in batch:
+                self.values[spotify_id] = fetched.get(spotify_id) or {"spotify_id": spotify_id}
+            self.flush()
+
+    def missing_ids(self, spotify_ids: list[str]) -> list[str]:
+        seen = set()
+        missing = []
+        for value in spotify_ids:
+            spotify_id = _clean_text(value)
+            if not spotify_id or spotify_id in seen or spotify_id in self.values:
+                continue
+            seen.add(spotify_id)
+            missing.append(spotify_id)
+        return missing
+
     def flush(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.values, indent=2, sort_keys=True), encoding="utf-8")
+
+
+async def _get_spotify_tracks(track_ids: list[str]) -> dict[str, dict[str, Any]]:
+    if not track_ids:
+        return {}
+    data = await _spotify_get_json(
+        "https://api.spotify.com/v1/tracks",
+        params={"ids": ",".join(track_ids[:50])},
+    )
+    tracks: dict[str, dict[str, Any]] = {}
+    for track in data.get("tracks") or []:
+        if not isinstance(track, dict) or not track.get("id"):
+            continue
+        tracks[str(track["id"])] = _format_spotify_track(track)
+    return tracks
 
 
 async def plan_album_action(
@@ -225,6 +262,7 @@ async def run_backfill(args: argparse.Namespace) -> AlbumBackfillStats:
             trusted_only=args.trusted_only,
         )
         stats.songs_scanned = len(songs)
+        await cache.preload(trusted_spotify_ids(songs))
         for song in songs:
             action = await plan_album_action(song, cache, allow_review_search=not args.skip_review_search)
             actions.append(action)
@@ -311,6 +349,18 @@ async def fetch_songs(
 
 def unique_album_count(actions: list[AlbumBackfillAction]) -> int:
     return len({action.album_key for action in actions if action.album_key})
+
+
+def trusted_spotify_ids(songs: list[SongAlbumSnapshot]) -> list[str]:
+    ids = []
+    for song in songs:
+        metadata = _metadata_from_analysis(song.analysis_json)
+        if _has_spotify_album_identity(metadata):
+            continue
+        spotify_id = _spotify_id_from_song(song, metadata)
+        if spotify_id:
+            ids.append(spotify_id)
+    return ids
 
 
 def _metadata_from_analysis(payload: dict[str, Any]) -> dict[str, Any]:
