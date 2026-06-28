@@ -285,9 +285,12 @@ async def run_backfill(args: argparse.Namespace) -> AlbumBackfillStats:
     actions: list[AlbumBackfillAction] = []
     cache = SpotifyTrackCache(args.cache_path)
     try:
+        song_ids = _song_ids_from_file(args.song_id_file)
+        if args.song_id:
+            song_ids.append(args.song_id)
         songs = await fetch_songs(
             conn,
-            song_id=args.song_id or None,
+            song_ids=song_ids,
             limit=args.limit,
             offset=args.offset,
             trusted_only=args.trusted_only,
@@ -329,7 +332,7 @@ async def run_backfill(args: argparse.Namespace) -> AlbumBackfillStats:
 async def fetch_songs(
     conn: Any,
     *,
-    song_id: str | None,
+    song_ids: list[str] | None = None,
     limit: int,
     offset: int,
     trusted_only: bool = False,
@@ -337,9 +340,10 @@ async def fetch_songs(
 ) -> list[SongAlbumSnapshot]:
     params: list[Any] = []
     clauses = []
-    if song_id:
-        params.append(song_id)
-        clauses.append(f"s.id = ${len(params)}")
+    song_ids = [str(song_id).strip() for song_id in (song_ids or []) if str(song_id).strip()]
+    if song_ids:
+        params.append(song_ids)
+        clauses.append(f"s.id = ANY(${len(params)}::uuid[])")
     if trusted_only:
         clauses.append(
             """
@@ -389,6 +393,12 @@ async def fetch_songs(
 
 def unique_album_count(actions: list[AlbumBackfillAction]) -> int:
     return len({action.album_key for action in actions if action.album_key})
+
+
+def _song_ids_from_file(path: Path | None) -> list[str]:
+    if not path:
+        return []
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def trusted_spotify_ids(songs: list[SongAlbumSnapshot]) -> list[str]:
@@ -553,6 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--song-id", default="")
+    parser.add_argument("--song-id-file", type=Path)
     parser.add_argument("--cache-path", type=Path, default=Path("docs/reports/spotify_album_backfill_cache.json"))
     parser.add_argument("--report-jsonl", type=Path)
     parser.add_argument("--review-output", type=Path)
