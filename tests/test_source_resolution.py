@@ -10,6 +10,7 @@ from app.jobs.adapters import (
 from app.legacy.utils.source import (
     _artists_from_embed_html,
     _first_text,
+    _format_spotify_track,
     _with_spotify_artist_genres,
     download_youtube_audio,
     extract_youtube_video_id,
@@ -62,6 +63,8 @@ def test_partial_crawler_spotify_metadata_needs_enrichment():
         metadata={
             "title": "Song",
             "artist": "Artist",
+            "album_id": "album-1",
+            "album": "Album",
             "album_art_url": "https://img",
             "album_art_highres": "https://img",
             "genre": "pop",
@@ -106,6 +109,40 @@ def test_spotify_metadata_without_genre_gets_honest_default():
     assert metadata["genre_source"] == "fallback_music"
 
 
+def test_spotify_track_format_preserves_album_identity_and_creators():
+    metadata = _format_spotify_track(
+        {
+            "id": "track-1",
+            "name": "Song",
+            "artists": [{"id": "artist-1", "name": "Artist"}],
+            "album": {
+                "id": "album-1",
+                "name": "Album",
+                "album_type": "single",
+                "release_date": "2026-01-01",
+                "total_tracks": 1,
+                "artists": [{"id": "artist-1", "name": "Artist"}],
+                "images": [
+                    {"url": "https://hi", "height": 640},
+                    {"url": "https://med", "height": 300},
+                    {"url": "https://low", "height": 64},
+                ],
+            },
+            "duration_ms": 123000,
+            "external_ids": {"isrc": "US123"},
+            "popularity": 50,
+        }
+    )
+
+    assert metadata["album_id"] == "album-1"
+    assert metadata["album"] == "Album"
+    assert metadata["album_type"] == "single"
+    assert metadata["album_artists"] == [{"id": "artist-1", "name": "Artist"}]
+    assert metadata["album_art_highres"] == "https://hi"
+    assert metadata["album_art_medres"] == "https://med"
+    assert metadata["album_art_lowres"] == "https://low"
+
+
 @pytest.mark.asyncio
 async def test_partial_crawler_metadata_is_enriched_from_spotify_source(monkeypatch):
     async def fake_resolve_source_metadata(source: str):
@@ -116,6 +153,8 @@ async def test_partial_crawler_metadata_is_enriched_from_spotify_source(monkeypa
                 "spotify_id": "abc",
                 "title": "Resolved Song",
                 "artist": "Resolved Artist",
+                "album_id": "album-1",
+                "album": "Resolved Album",
                 "album_art_url": "https://cover",
                 "album_art_highres": "https://cover-hi",
                 "album_art_medres": "https://cover-med",
@@ -133,6 +172,8 @@ async def test_partial_crawler_metadata_is_enriched_from_spotify_source(monkeypa
     )
 
     assert metadata["title"] == "Resolved Song"
+    assert metadata["album_id"] == "album-1"
+    assert metadata["album"] == "Resolved Album"
     assert metadata["album_art_url"] == "https://cover"
     assert metadata["genre"] == "indie pop"
     assert metadata["popularity"] == 80

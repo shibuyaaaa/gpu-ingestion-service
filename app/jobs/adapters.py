@@ -2171,7 +2171,9 @@ def _payload_spotify_metadata_needs_enrichment(*, source: str, metadata: dict[st
     if not str(source or "").startswith("spotify:track:") and "open.spotify.com/track/" not in str(source or ""):
         return False
     return not (
-        _truthy_metadata_value(metadata.get("album_art_url"))
+        _truthy_metadata_value(metadata.get("album"))
+        and _truthy_metadata_value(metadata.get("album_id") or metadata.get("source_album_id"))
+        and _truthy_metadata_value(metadata.get("album_art_url"))
         and _truthy_metadata_value(metadata.get("album_art_highres"))
         and _truthy_metadata_value(metadata.get("genre"))
     )

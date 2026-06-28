@@ -51,7 +51,8 @@ class SpotifyChartPlaylistClient:
                         "limit": 100,
                         "offset": offset,
                         "fields": (
-                            "items(track(id,name,popularity,artists(name),album(name,images),"
+                            "items(track(id,name,popularity,artists(id,name),"
+                            "album(id,name,images,release_date,album_type,total_tracks,artists(id,name)),"
                             "duration_ms,external_ids)),next"
                         ),
                     },
@@ -105,9 +106,26 @@ async def _spotify_token(*, timeout_seconds: float) -> str:
 def _candidate_from_track(track: dict[str, Any], *, playlist_source: str, rank: int) -> ChartCandidate | None:
     spotify_id = str(track.get("id") or "").strip()
     title = str(track.get("name") or "").strip()
-    artists = [str(artist.get("name")).strip() for artist in track.get("artists", []) if artist.get("name")]
+    artist_items = [artist for artist in track.get("artists", []) if isinstance(artist, dict)]
+    artists = [str(artist.get("name")).strip() for artist in artist_items if artist.get("name")]
+    artist_ids = [str(artist.get("id")).strip() for artist in artist_items if artist.get("id")]
     if not spotify_id or not title or not artists:
         return None
+    album = track.get("album") if isinstance(track.get("album"), dict) else {}
+    images = sorted(
+        album.get("images") or [],
+        key=lambda image: image.get("height", 0) if isinstance(image, dict) else 0,
+        reverse=True,
+    )
+    album_art_highres = images[0]["url"] if len(images) > 0 and images[0].get("url") else None
+    album_art_medres = images[1]["url"] if len(images) > 1 and images[1].get("url") else album_art_highres
+    album_art_lowres = images[2]["url"] if len(images) > 2 and images[2].get("url") else album_art_medres
+    album_artist_items = [artist for artist in album.get("artists", []) if isinstance(artist, dict)]
+    album_artists = [
+        {"id": str(artist.get("id") or "").strip(), "name": str(artist.get("name") or "").strip()}
+        for artist in album_artist_items
+        if artist.get("name")
+    ]
     return ChartCandidate(
         spotify_id=spotify_id,
         title=title,
@@ -116,6 +134,19 @@ def _candidate_from_track(track: dict[str, Any], *, playlist_source: str, rank: 
         popularity=int(track.get("popularity") or 0),
         playlist_source=playlist_source,
         rank=rank,
+        artist_ids=artist_ids,
+        album_id=str(album.get("id") or "").strip() or None,
+        album=str(album.get("name") or "").strip() or None,
+        album_art_url=album_art_highres,
+        album_art_highres=album_art_highres,
+        album_art_medres=album_art_medres,
+        album_art_lowres=album_art_lowres,
+        album_artists=album_artists,
+        album_type=str(album.get("album_type") or "").strip() or None,
+        release_date=str(album.get("release_date") or "").strip() or None,
+        total_tracks=int(album["total_tracks"]) if album.get("total_tracks") is not None else None,
+        duration_ms=int(track["duration_ms"]) if track.get("duration_ms") is not None else None,
+        isrc=(track.get("external_ids") or {}).get("isrc"),
     )
 
 

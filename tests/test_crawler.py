@@ -5,7 +5,7 @@ from app.config import DEFAULT_CRAWLER_KWORB_CHART_URLS, Settings
 from app.crawler.kworb import parse_kworb_chart
 from app.crawler.ops import IngestionOpsUnavailable, JobTerminalState
 from app.crawler.runner import CrawlerRunner
-from app.crawler.spotify import _dedupe_and_sort
+from app.crawler.spotify import _candidate_from_track, _dedupe_and_sort
 from app.crawler.store import CrawlerStore
 from app.crawler.types import ChartCandidate
 
@@ -80,6 +80,43 @@ def test_spotify_candidates_dedupe_and_sort_by_popularity_then_rank():
 
     assert [candidate.spotify_id for candidate in sorted_candidates] == ["c", "b", "a"]
     assert sorted_candidates[-1].popularity == 80
+
+
+def test_spotify_candidate_metadata_preserves_album_fields():
+    candidate = _candidate_from_track(
+        {
+            "id": "track-1",
+            "name": "Song",
+            "popularity": 50,
+            "artists": [{"id": "artist-1", "name": "Artist"}],
+            "album": {
+                "id": "album-1",
+                "name": "Album",
+                "album_type": "single",
+                "release_date": "2026-01-01",
+                "total_tracks": 1,
+                "artists": [{"id": "artist-1", "name": "Artist"}],
+                "images": [
+                    {"url": "https://hi", "height": 640},
+                    {"url": "https://med", "height": 300},
+                    {"url": "https://low", "height": 64},
+                ],
+            },
+            "duration_ms": 123000,
+            "external_ids": {"isrc": "US123"},
+        },
+        playlist_source="spotify:playlist:charts",
+        rank=1,
+    )
+
+    metadata = candidate.to_metadata()
+
+    assert metadata["album_id"] == "album-1"
+    assert metadata["album"] == "Album"
+    assert metadata["album_type"] == "single"
+    assert metadata["album_artists"] == [{"id": "artist-1", "name": "Artist"}]
+    assert metadata["artist_ids"] == ["artist-1"]
+    assert metadata["isrc"] == "US123"
 
 
 def test_default_crawler_sources_are_north_america_first_then_global():

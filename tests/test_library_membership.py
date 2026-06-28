@@ -10,7 +10,7 @@ from app.config import Settings
 from app.jobs.adapters import BulkDissectAdapter
 from app.jobs.context import JobContext
 from app.library_membership import LibraryLookupResult, LibraryMembershipChecker, LibrarySong
-from app.library_writer import LibraryPublishResult, LibraryWriter, _analysis_payload, _analysis_bpms
+from app.library_writer import LibraryPublishResult, LibraryWriter, _analysis_payload, _analysis_bpms, upsert_song_album_metadata
 from app.legacy.db import DBClient
 from app.legacy.utils import GCSClient
 from app.queue import JobStage, JobStore, JobType
@@ -94,6 +94,71 @@ def test_analysis_payload_exposes_enriched_beat_grid_key_and_genre(tmp_path):
     assert payload["gpu_ingestion"]["summary"]["downbeat_count"] == 1
     assert payload["gpu_ingestion"]["summary"]["upbeat_count"] == 3
     assert payload["analysis"]["beat_grid"][1]["is_upbeat"] is True
+
+
+async def test_album_metadata_upsert_links_song_album_and_creators():
+    class FakeConn:
+        def __init__(self):
+            self.artist_ids: dict[str, str] = {}
+            self.album_insert_args = None
+            self.executed = []
+
+        async def fetchrow(self, query, *args):
+            if "FROM artist_sources" in query:
+                return None
+            if "INSERT INTO artists" in query:
+                name = args[0]
+                self.artist_ids.setdefault(name, f"artist-{len(self.artist_ids) + 1}")
+                return {"id": self.artist_ids[name]}
+            if "INSERT INTO albums" in query:
+                self.album_insert_args = args
+                return {"id": "album-1"}
+            raise AssertionError(f"unexpected fetchrow query: {query}")
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+    conn = FakeConn()
+
+    album_id = await upsert_song_album_metadata(
+        conn,
+        song_id="song-1",
+        metadata={
+            "spotify_id": "track-1",
+            "title": "Song",
+            "artist": "Track Artist",
+            "artists": [{"id": "track-artist-1", "name": "Track Artist"}],
+            "album_id": "album-1",
+            "album": "Single Release",
+            "album_type": "single",
+            "release_date": "2026-01-01",
+            "total_tracks": 1,
+            "album_artists": [{"id": "album-artist-1", "name": "Album Artist"}],
+            "album_art_url": "https://cover-hi",
+            "album_art_highres": "https://cover-hi",
+            "album_art_medres": "https://cover-med",
+            "album_art_lowres": "https://cover-low",
+            "isrc": "US123",
+        },
+    )
+
+    assert album_id == "album-1"
+    assert conn.album_insert_args[1] == "album-1"
+    assert conn.album_insert_args[2] == "Single Release"
+    assert conn.album_insert_args[3] == "single"
+    assert conn.album_insert_args[6] == "Album Artist"
+    assert conn.album_insert_args[8] == "https://cover-low"
+    assert conn.album_insert_args[9] == "https://cover-med"
+    assert conn.album_insert_args[10] == "https://cover-hi"
+
+    artist_source_args = [
+        args for query, args in conn.executed if "INSERT INTO artist_sources" in query
+    ]
+    assert ("artist-1", "spotify", "track-artist-1", "https://open.spotify.com/artist/track-artist-1", '{"name": "Track Artist"}') in artist_source_args
+    assert ("artist-2", "spotify", "album-artist-1", "https://open.spotify.com/artist/album-artist-1", '{"name": "Album Artist"}') in artist_source_args
+    assert any("INSERT INTO album_artists" in query for query, _ in conn.executed)
+    assert any("INSERT INTO song_albums" in query for query, _ in conn.executed)
 
 
 async def test_library_writer_skips_db_when_job_requests_no_library_write():

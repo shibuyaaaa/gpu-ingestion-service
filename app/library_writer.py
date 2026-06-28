@@ -65,6 +65,11 @@ class LibraryWriter:
                         f"gpu_ingestion_song:{identity_key}",
                     )
                     song_id = await self._ensure_song(conn, job)
+                    await upsert_song_album_metadata(
+                        conn,
+                        song_id=song_id,
+                        metadata=job.artifacts.get("spotify_metadata") or {},
+                    )
                     artist_id = await self._main_artist_id(conn, song_id)
                     stem_rows = []
                     for stem_type in _ordered_stems(publishable):
@@ -107,6 +112,11 @@ class LibraryWriter:
                         f"gpu_ingestion_song:{identity_key}",
                     )
                     song_id = await self._ensure_song(conn, job)
+                    await upsert_song_album_metadata(
+                        conn,
+                        song_id=song_id,
+                        metadata=job.artifacts.get("spotify_metadata") or {},
+                    )
                     await self._update_ingestion_status(conn, song_id=song_id, job=job, status="complete")
                     song = await self._song_for_cache(conn, song_id, status="complete")
             if song:
@@ -607,6 +617,237 @@ def _analysis_payload(job: JobRecord, *, status: str) -> dict[str, Any]:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
     }
+
+
+async def upsert_song_album_metadata(conn: Any, *, song_id: str, metadata: dict[str, Any]) -> str | None:
+    """Persist Spotify album/creator metadata for a song when authoritative IDs exist.
+
+    Callers should run this inside the same DB transaction as the song write.
+    The unique indexes are the final duplicate guard; the advisory locks keep
+    concurrent ingestion workers from racing through the same catalog identity.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    album_source_id = _clean_text(metadata.get("album_id") or metadata.get("source_album_id"))
+    album_title = _clean_text(metadata.get("album"))
+    if not album_source_id or not album_title:
+        return None
+
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"spotify_album:{album_source_id}")
+
+    track_artists = _artist_entries_from_metadata(metadata)
+    for index, entry in enumerate(track_artists):
+        artist_id = await ensure_catalog_artist(conn, entry)
+        await conn.execute(
+            """
+            INSERT INTO song_artists (song_id, artist_id, artist_role)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (song_id, artist_id, artist_role) DO NOTHING
+            """,
+            song_id,
+            artist_id,
+            "main" if index == 0 else "featured",
+        )
+
+    album_artists = _album_artist_entries_from_metadata(metadata) or track_artists
+    primary_artist_name = album_artists[0]["name"] if album_artists else _clean_text(metadata.get("artist"))
+    row = await conn.fetchrow(
+        """
+        INSERT INTO albums (
+            source, source_album_id, title, album_type, release_date, total_tracks,
+            primary_artist_name, cover_art_url, cover_art_square_lowres,
+            cover_art_square_medres, cover_art_square_highres, attribution
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+        ON CONFLICT (source, source_album_id) WHERE source_album_id IS NOT NULL
+        DO UPDATE SET
+            title = EXCLUDED.title,
+            album_type = COALESCE(EXCLUDED.album_type, albums.album_type),
+            release_date = COALESCE(EXCLUDED.release_date, albums.release_date),
+            total_tracks = COALESCE(EXCLUDED.total_tracks, albums.total_tracks),
+            primary_artist_name = COALESCE(EXCLUDED.primary_artist_name, albums.primary_artist_name),
+            cover_art_url = COALESCE(EXCLUDED.cover_art_url, albums.cover_art_url),
+            cover_art_square_lowres = COALESCE(EXCLUDED.cover_art_square_lowres, albums.cover_art_square_lowres),
+            cover_art_square_medres = COALESCE(EXCLUDED.cover_art_square_medres, albums.cover_art_square_medres),
+            cover_art_square_highres = COALESCE(EXCLUDED.cover_art_square_highres, albums.cover_art_square_highres),
+            attribution = albums.attribution || EXCLUDED.attribution,
+            updated_at = NOW()
+        RETURNING id
+        """,
+        "spotify",
+        album_source_id,
+        album_title,
+        _clean_text(metadata.get("album_type")) or None,
+        _clean_text(metadata.get("release_date")) or None,
+        _int_or_none(metadata.get("total_tracks")),
+        primary_artist_name or None,
+        _clean_text(metadata.get("album_art_url") or metadata.get("album_art_highres")) or None,
+        _clean_text(metadata.get("album_art_lowres") or metadata.get("album_art_url")) or None,
+        _clean_text(metadata.get("album_art_medres") or metadata.get("album_art_url")) or None,
+        _clean_text(metadata.get("album_art_highres") or metadata.get("album_art_url")) or None,
+        json.dumps(_album_attribution(metadata)),
+    )
+    album_id = str(row["id"])
+
+    for index, entry in enumerate(album_artists):
+        artist_id = await ensure_catalog_artist(conn, entry)
+        await conn.execute(
+            """
+            INSERT INTO album_artists (album_id, artist_id, artist_role, position)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (album_id, artist_id, artist_role)
+            DO UPDATE SET position = LEAST(album_artists.position, EXCLUDED.position)
+            """,
+            album_id,
+            artist_id,
+            "main" if index == 0 else "featured",
+            index,
+        )
+
+    await conn.execute(
+        "UPDATE song_albums SET is_primary = FALSE WHERE song_id = $1 AND is_primary AND album_id <> $2",
+        song_id,
+        album_id,
+    )
+    await conn.execute(
+        """
+        INSERT INTO song_albums (song_id, album_id, source, is_primary)
+        VALUES ($1, $2, $3, TRUE)
+        ON CONFLICT (song_id, album_id)
+        DO UPDATE SET source = EXCLUDED.source, is_primary = TRUE
+        """,
+        song_id,
+        album_id,
+        "spotify",
+    )
+    return album_id
+
+
+async def ensure_catalog_artist(conn: Any, entry: dict[str, Any]) -> str:
+    name = _clean_text(entry.get("name"))
+    if not name:
+        raise ValueError("artist name is required")
+    source_artist_id = _clean_text(entry.get("id") or entry.get("source_artist_id"))
+    if source_artist_id:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"spotify_artist:{source_artist_id}")
+        existing = await conn.fetchrow(
+            """
+            SELECT artist_id
+            FROM artist_sources
+            WHERE source = $1 AND source_artist_id = $2
+            LIMIT 1
+            """,
+            "spotify",
+            source_artist_id,
+        )
+        if existing:
+            return str(existing["artist_id"])
+    row = await conn.fetchrow(
+        """
+        INSERT INTO artists (name)
+        VALUES ($1)
+        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        name,
+    )
+    artist_id = str(row["id"])
+    if source_artist_id:
+        await conn.execute(
+            """
+            INSERT INTO artist_sources (artist_id, source, source_artist_id, source_url, metadata)
+            VALUES ($1, $2, $3, $4, $5::jsonb)
+            ON CONFLICT (source, source_artist_id) WHERE source_artist_id IS NOT NULL
+            DO UPDATE SET
+                artist_id = EXCLUDED.artist_id,
+                source_url = COALESCE(EXCLUDED.source_url, artist_sources.source_url),
+                metadata = artist_sources.metadata || EXCLUDED.metadata,
+                updated_at = NOW()
+            """,
+            artist_id,
+            "spotify",
+            source_artist_id,
+            f"https://open.spotify.com/artist/{source_artist_id}",
+            json.dumps({"name": name}),
+        )
+    return artist_id
+
+
+def _artist_entries_from_metadata(metadata: dict[str, Any]) -> list[dict[str, str]]:
+    raw_artists = metadata.get("artists")
+    raw_ids = metadata.get("artist_ids")
+    ids = [str(value).strip() for value in raw_ids] if isinstance(raw_ids, list) else []
+    entries: list[dict[str, str]] = []
+    if isinstance(raw_artists, list):
+        for index, artist in enumerate(raw_artists):
+            if isinstance(artist, dict):
+                name = _clean_text(artist.get("name"))
+                source_id = _clean_text(artist.get("id") or artist.get("source_artist_id"))
+            else:
+                name = _clean_text(artist)
+                source_id = ids[index] if index < len(ids) else ""
+            if name:
+                entries.append({"name": name, "id": source_id})
+    if not entries:
+        artist = _clean_text(metadata.get("artist"))
+        if artist:
+            entries.append({"name": artist, "id": ids[0] if ids else ""})
+    return _dedupe_artist_entries(entries)
+
+
+def _album_artist_entries_from_metadata(metadata: dict[str, Any]) -> list[dict[str, str]]:
+    raw_artists = metadata.get("album_artists")
+    entries: list[dict[str, str]] = []
+    if isinstance(raw_artists, list):
+        for artist in raw_artists:
+            if isinstance(artist, dict):
+                name = _clean_text(artist.get("name"))
+                source_id = _clean_text(artist.get("id") or artist.get("source_artist_id"))
+            else:
+                name = _clean_text(artist)
+                source_id = ""
+            if name:
+                entries.append({"name": name, "id": source_id})
+    return _dedupe_artist_entries(entries)
+
+
+def _dedupe_artist_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen = set()
+    deduped = []
+    for entry in entries:
+        key = entry.get("id") or entry.get("name", "").casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
+def _album_attribution(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "source": "spotify",
+            "metadata_source": metadata.get("metadata_source"),
+            "spotify_track_id": metadata.get("spotify_id") or metadata.get("id"),
+            "spotify_album_id": metadata.get("album_id") or metadata.get("source_album_id"),
+            "isrc": metadata.get("isrc"),
+        }.items()
+        if value not in (None, "", [])
+    }
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _skip_library_write(job: JobRecord) -> bool:

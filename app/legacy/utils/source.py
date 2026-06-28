@@ -361,14 +361,24 @@ def _retry_after_seconds(response: httpx.Response) -> float:
 
 
 def _format_spotify_track(track: dict[str, Any]) -> dict[str, Any]:
+    album = track.get("album", {}) if isinstance(track.get("album"), dict) else {}
     images = sorted(
-        track.get("album", {}).get("images", []),
+        album.get("images", []),
         key=lambda image: image.get("height", 0),
         reverse=True,
     )
     artist_items = [artist for artist in track.get("artists", []) if isinstance(artist, dict)]
     artists = [artist.get("name", "") for artist in artist_items if artist.get("name")]
     artist_ids = [artist.get("id", "") for artist in artist_items if artist.get("id")]
+    album_artist_items = [artist for artist in album.get("artists", []) if isinstance(artist, dict)]
+    album_artists = [
+        {
+            "id": str(artist.get("id") or "").strip(),
+            "name": str(artist.get("name") or "").strip(),
+        }
+        for artist in album_artist_items
+        if artist.get("name")
+    ]
     genres = _spotify_artist_genres_from_track(track)
     album_art_highres = images[0]["url"] if len(images) > 0 else None
     album_art_medres = images[1]["url"] if len(images) > 1 else album_art_highres
@@ -379,7 +389,12 @@ def _format_spotify_track(track: dict[str, Any]) -> dict[str, Any]:
         "artist": artists[0] if artists else "",
         "artists": artists,
         "artist_ids": artist_ids,
-        "album": track.get("album", {}).get("name", ""),
+        "album_id": album.get("id"),
+        "album": album.get("name", ""),
+        "album_artists": album_artists,
+        "album_type": album.get("album_type"),
+        "release_date": album.get("release_date"),
+        "total_tracks": album.get("total_tracks"),
         "duration_ms": track.get("duration_ms", 0),
         "album_art_url": album_art_highres,
         "album_art_highres": album_art_highres,
