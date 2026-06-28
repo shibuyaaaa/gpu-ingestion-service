@@ -117,7 +117,12 @@ class SpotifyTrackCache:
         self.path.write_text(json.dumps(self.values, indent=2, sort_keys=True), encoding="utf-8")
 
 
-async def plan_album_action(song: SongAlbumSnapshot, cache: SpotifyTrackCache) -> AlbumBackfillAction:
+async def plan_album_action(
+    song: SongAlbumSnapshot,
+    cache: SpotifyTrackCache,
+    *,
+    allow_review_search: bool = True,
+) -> AlbumBackfillAction:
     metadata = _metadata_from_analysis(song.analysis_json)
     spotify_id = _spotify_id_from_song(song, metadata)
     if _has_spotify_album_identity(metadata):
@@ -155,14 +160,18 @@ async def plan_album_action(song: SongAlbumSnapshot, cache: SpotifyTrackCache) -
                 metadata=_merge_metadata(resolved, metadata),
             )
 
-    review_candidates = await _review_candidates_for_song(song)
+    review_candidates = await _review_candidates_for_song(song) if allow_review_search else []
     return AlbumBackfillAction(
         song_id=song.id,
         title=song.title,
         artists=song.artists,
         action_type="review_required" if review_candidates else "no_trusted_album_source",
         source="spotify_search" if review_candidates else "none",
-        reason="no Spotify track ID with album identity; title/artist search is review-only",
+        reason=(
+            "no Spotify track ID with album identity; title/artist search is review-only"
+            if allow_review_search
+            else "no Spotify track ID with album identity; review search skipped"
+        ),
         metadata=metadata,
         review_candidates=review_candidates,
     )
@@ -208,10 +217,16 @@ async def run_backfill(args: argparse.Namespace) -> AlbumBackfillStats:
     actions: list[AlbumBackfillAction] = []
     cache = SpotifyTrackCache(args.cache_path)
     try:
-        songs = await fetch_songs(conn, song_id=args.song_id or None, limit=args.limit, offset=args.offset)
+        songs = await fetch_songs(
+            conn,
+            song_id=args.song_id or None,
+            limit=args.limit,
+            offset=args.offset,
+            trusted_only=args.trusted_only,
+        )
         stats.songs_scanned = len(songs)
         for song in songs:
-            action = await plan_album_action(song, cache)
+            action = await plan_album_action(song, cache, allow_review_search=not args.skip_review_search)
             actions.append(action)
         stats.actions_planned = len(actions)
         stats.action_counts.update(action.action_type for action in actions)
@@ -236,12 +251,31 @@ async def run_backfill(args: argparse.Namespace) -> AlbumBackfillStats:
     return stats
 
 
-async def fetch_songs(conn: Any, *, song_id: str | None, limit: int, offset: int) -> list[SongAlbumSnapshot]:
+async def fetch_songs(
+    conn: Any,
+    *,
+    song_id: str | None,
+    limit: int,
+    offset: int,
+    trusted_only: bool = False,
+) -> list[SongAlbumSnapshot]:
     params: list[Any] = []
-    where = ""
+    clauses = []
     if song_id:
         params.append(song_id)
-        where = f"WHERE s.id = ${len(params)}"
+        clauses.append(f"s.id = ${len(params)}")
+    if trusted_only:
+        clauses.append(
+            """
+            (
+                COALESCE(s.analysis_json::text, '') LIKE '%spotify_metadata%'
+                OR COALESCE(s.analysis_json::text, '') LIKE '%"spotify"%'
+                OR COALESCE(s.analysis_json::text, '') LIKE '%spotify:track:%'
+                OR COALESCE(s.analysis_json::text, '') LIKE '%open.spotify.com/track/%'
+            )
+            """
+        )
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     limit_clause = ""
     if limit:
         params.append(limit)
@@ -388,6 +422,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Compatibility flag; dry-run is default unless --apply is passed.")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm-production", action="store_true")
+    parser.add_argument(
+        "--trusted-only",
+        action="store_true",
+        help="Only scan songs whose analysis_json contains Spotify metadata or a Spotify track URL.",
+    )
+    parser.add_argument(
+        "--skip-review-search",
+        action="store_true",
+        help="Do not run title/artist Spotify search for songs missing a trusted track ID.",
+    )
     parser.add_argument("--env-file", type=Path, default=Path("../shibuya-api/.env"))
     parser.add_argument("--database-url", default="")
     return parser
