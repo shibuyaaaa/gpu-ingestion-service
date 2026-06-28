@@ -78,6 +78,69 @@ async def test_album_backfill_can_skip_review_search_for_no_id_rows():
     assert action.review_candidates == []
 
 
+async def test_album_backfill_auto_applies_exact_title_artist_search_match(monkeypatch):
+    class Cache:
+        async def get(self, spotify_id):
+            raise AssertionError("cache should not be used without a Spotify track ID")
+
+    async def fake_candidates(song):
+        return [
+            {
+                "spotify_id": "track-1",
+                "title": "Rover (feat. DTG)",
+                "artist": "S1mba",
+                "artists": ["S1mba", "DTG"],
+                "artist_ids": ["artist-1", "artist-2"],
+                "album_id": "album-1",
+                "album": "Rover (feat. DTG)",
+                "album_type": "single",
+            }
+        ]
+
+    monkeypatch.setattr("app.tools.album_backfill._review_candidates_for_song", fake_candidates)
+    song = SongAlbumSnapshot(id="song-1", title="Rover (feat. DTG)", artists=["DTG", "S1mba"], analysis_json={})
+
+    action = await plan_album_action(song, Cache(), allow_review_search=True, allow_search_auto_apply=True)
+
+    assert action.action_type == "upsert_album_link"
+    assert action.source == "spotify_search_auto"
+    assert action.metadata["album_id"] == "album-1"
+
+
+async def test_album_backfill_keeps_ambiguous_search_matches_for_review(monkeypatch):
+    class Cache:
+        async def get(self, spotify_id):
+            raise AssertionError("cache should not be used without a Spotify track ID")
+
+    async def fake_candidates(song):
+        return [
+            {
+                "spotify_id": "track-1",
+                "title": "Song",
+                "artist": "Artist",
+                "artists": ["Artist"],
+                "album_id": "album-1",
+                "album": "Album One",
+            },
+            {
+                "spotify_id": "track-2",
+                "title": "Song",
+                "artist": "Artist",
+                "artists": ["Artist"],
+                "album_id": "album-2",
+                "album": "Album Two",
+            },
+        ]
+
+    monkeypatch.setattr("app.tools.album_backfill._review_candidates_for_song", fake_candidates)
+    song = SongAlbumSnapshot(id="song-1", title="Song", artists=["Artist"], analysis_json={})
+
+    action = await plan_album_action(song, Cache(), allow_review_search=True, allow_search_auto_apply=True)
+
+    assert action.action_type == "review_required"
+    assert action.review_candidates[0]["album_id"] == "album-1"
+
+
 def test_album_backfill_collects_and_dedupes_trusted_spotify_ids(tmp_path):
     songs = [
         SongAlbumSnapshot(

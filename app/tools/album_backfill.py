@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -168,6 +169,7 @@ async def plan_album_action(
     cache: SpotifyTrackCache,
     *,
     allow_review_search: bool = True,
+    allow_search_auto_apply: bool = False,
 ) -> AlbumBackfillAction:
     metadata = _metadata_from_analysis(song.analysis_json)
     spotify_id = _spotify_id_from_song(song, metadata)
@@ -207,6 +209,18 @@ async def plan_album_action(
             )
 
     review_candidates = await _review_candidates_for_song(song) if allow_review_search else []
+    trusted_search_match = _trusted_search_match(song, review_candidates) if allow_search_auto_apply else None
+    if trusted_search_match:
+        return AlbumBackfillAction(
+            song_id=song.id,
+            title=song.title,
+            artists=song.artists,
+            action_type="upsert_album_link",
+            source="spotify_search_auto",
+            reason="title/artist Spotify search produced one exact album-backed match",
+            metadata=trusted_search_match,
+            review_candidates=review_candidates,
+        )
     return AlbumBackfillAction(
         song_id=song.id,
         title=song.title,
@@ -238,10 +252,18 @@ async def _review_candidates_for_song(song: SongAlbumSnapshot) -> list[dict[str,
                 "spotify_id": track.get("spotify_id"),
                 "title": track.get("title"),
                 "artist": track.get("artist"),
+                "artists": track.get("artists") or [],
+                "artist_ids": track.get("artist_ids") or [],
                 "album_id": track.get("album_id"),
                 "album": track.get("album"),
+                "album_artists": track.get("album_artists") or [],
                 "album_type": track.get("album_type"),
                 "release_date": track.get("release_date"),
+                "total_tracks": track.get("total_tracks"),
+                "album_art_url": track.get("album_art_url"),
+                "album_art_highres": track.get("album_art_highres"),
+                "album_art_medres": track.get("album_art_medres"),
+                "album_art_lowres": track.get("album_art_lowres"),
             }
         )
     return candidates
@@ -269,11 +291,17 @@ async def run_backfill(args: argparse.Namespace) -> AlbumBackfillStats:
             limit=args.limit,
             offset=args.offset,
             trusted_only=args.trusted_only,
+            missing_only=args.missing_only,
         )
         stats.songs_scanned = len(songs)
         await cache.preload(trusted_spotify_ids(songs))
         for song in songs:
-            action = await plan_album_action(song, cache, allow_review_search=not args.skip_review_search)
+            action = await plan_album_action(
+                song,
+                cache,
+                allow_review_search=not args.skip_review_search,
+                allow_search_auto_apply=args.search_auto_apply,
+            )
             actions.append(action)
         stats.actions_planned = len(actions)
         stats.action_counts.update(action.action_type for action in actions)
@@ -305,6 +333,7 @@ async def fetch_songs(
     limit: int,
     offset: int,
     trusted_only: bool = False,
+    missing_only: bool = False,
 ) -> list[SongAlbumSnapshot]:
     params: list[Any] = []
     clauses = []
@@ -322,6 +351,8 @@ async def fetch_songs(
             )
             """
         )
+    if missing_only:
+        clauses.append("NOT EXISTS (SELECT 1 FROM song_albums sal_missing WHERE sal_missing.song_id = s.id)")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     limit_clause = ""
     if limit:
@@ -370,6 +401,53 @@ def trusted_spotify_ids(songs: list[SongAlbumSnapshot]) -> list[str]:
         if spotify_id:
             ids.append(spotify_id)
     return ids
+
+
+def _trusted_search_match(song: SongAlbumSnapshot, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    matching = []
+    for candidate in candidates:
+        if not _has_spotify_album_identity(candidate):
+            continue
+        if _title_match(song.title, str(candidate.get("title") or "")) and _artist_match(
+            song.artists,
+            candidate.get("artists") if isinstance(candidate.get("artists"), list) else [candidate.get("artist")],
+        ):
+            matching.append(candidate)
+    album_keys = {
+        _clean_text(candidate.get("album_id") or candidate.get("source_album_id"))
+        for candidate in matching
+        if _clean_text(candidate.get("album_id") or candidate.get("source_album_id"))
+    }
+    if len(matching) == 1 or len(album_keys) == 1:
+        return matching[0]
+    return None
+
+
+def _title_match(left: str, right: str) -> bool:
+    left_key = _normalized_title_key(left)
+    right_key = _normalized_title_key(right)
+    return bool(left_key and right_key and left_key == right_key)
+
+
+def _artist_match(song_artists: list[str], candidate_artists: list[Any]) -> bool:
+    song_keys = {_normalized_text_key(artist) for artist in song_artists if _normalized_text_key(artist)}
+    candidate_keys = {_normalized_text_key(artist) for artist in candidate_artists if _normalized_text_key(artist)}
+    return bool(song_keys and candidate_keys and song_keys.intersection(candidate_keys))
+
+
+def _normalized_title_key(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"\((?:feat|featuring|ft|with|prod)[^)]*\)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[(?:feat|featuring|ft|with|prod)[^\]]*\]", " ", text, flags=re.IGNORECASE)
+    return _normalized_text_key(text)
+
+
+def _normalized_text_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "").lower())
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"&", " and ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _metadata_from_analysis(payload: dict[str, Any]) -> dict[str, Any]:
@@ -490,6 +568,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-review-search",
         action="store_true",
         help="Do not run title/artist Spotify search for songs missing a trusted track ID.",
+    )
+    parser.add_argument(
+        "--search-auto-apply",
+        action="store_true",
+        help="Auto-apply title/artist Spotify search matches only when exactly one album-backed candidate matches.",
+    )
+    parser.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="Only scan songs that do not already have a song_albums row.",
     )
     parser.add_argument("--env-file", type=Path, default=Path("../shibuya-api/.env"))
     parser.add_argument("--database-url", default="")
