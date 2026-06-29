@@ -276,6 +276,8 @@ async def _get_spotify_track(track_id: str) -> dict[str, Any]:
 
 
 async def _get_spotify_embed_track(track_id: str) -> dict[str, Any]:
+    from app.album_metadata import AlbumMetadataResolver
+
     oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{track_id}"
     embed_url = f"https://open.spotify.com/embed/track/{track_id}?utm_source=oembed"
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
@@ -304,12 +306,7 @@ async def _get_spotify_embed_track(track_id: str) -> dict[str, Any]:
         "metadata_source": "spotify_embed",
     }
     try:
-        api_metadata = await _with_spotify_artist_genres(_format_spotify_track(await _get_spotify_track(track_id)))
-        return {
-            **metadata,
-            **{key: value for key, value in api_metadata.items() if value not in (None, "", [])},
-            "metadata_source": "spotify_embed_api_enriched",
-        }
+        return await AlbumMetadataResolver(resolver="public-first").resolve_track(track_id, existing=metadata)
     except Exception:
         return metadata
 

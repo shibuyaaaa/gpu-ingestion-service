@@ -6,6 +6,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from app.album_metadata import AlbumMetadataResolver
 from app.config import Settings, settings
 from app.crawler.kworb import KworbSpotifyChartClient
 from app.crawler.ops import IngestionOpsClient, IngestionOpsUnavailable
@@ -29,6 +30,7 @@ class CrawlerRunner:
         publisher: Any,
         ops: Any,
         library: Any,
+        album_resolver: Any | None = None,
         now: Any = time.time,
     ):
         self.settings = settings
@@ -37,6 +39,7 @@ class CrawlerRunner:
         self.publisher = publisher
         self.ops = ops
         self.library = library
+        self.album_resolver = album_resolver
         self._now = now
 
     async def run_forever(self) -> None:
@@ -93,6 +96,8 @@ class CrawlerRunner:
                 source_urls,
                 max_pages=self.settings.crawler_max_candidate_pages,
             )
+            if self.album_resolver is not None:
+                candidates = await self.album_resolver.enrich_candidates(candidates, prefer_api=True)
         except Exception as exc:
             self.store.mark_session_error(
                 session_id,
@@ -246,6 +251,7 @@ async def _main() -> None:
         publisher=LocalIngestionPublisher(ingestion_url=settings.crawler_ingestion_url),
         ops=IngestionOpsClient(base_url=settings.crawler_ops_base_url),
         library=library,
+        album_resolver=AlbumMetadataResolver(resolver="api-first"),
     )
     try:
         await library.warmup()

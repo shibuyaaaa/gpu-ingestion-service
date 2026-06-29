@@ -146,11 +146,11 @@ def test_spotify_track_format_preserves_album_identity_and_creators():
 
 @pytest.mark.asyncio
 async def test_partial_crawler_metadata_is_enriched_from_spotify_source(monkeypatch):
-    async def fake_resolve_source_metadata(source: str):
-        assert source == "spotify:track:abc"
-        return {
-            "source": source,
-            "spotify_metadata": {
+    class FakeAlbumResolver:
+        async def resolve_track(self, spotify_id: str, *, existing: dict):
+            assert spotify_id == "abc"
+            return {
+                **existing,
                 "spotify_id": "abc",
                 "title": "Resolved Song",
                 "artist": "Resolved Artist",
@@ -162,10 +162,9 @@ async def test_partial_crawler_metadata_is_enriched_from_spotify_source(monkeypa
                 "album_art_lowres": "https://cover-low",
                 "genre": "indie pop",
                 "genres": ["indie pop"],
-            },
-        }
+            }
 
-    monkeypatch.setattr("app.jobs.adapters.resolve_source_metadata", fake_resolve_source_metadata)
+    monkeypatch.setattr("app.jobs.adapters._album_metadata_resolver", lambda: FakeAlbumResolver())
 
     metadata = await _enrich_payload_spotify_metadata_if_needed(
         source="spotify:track:abc",

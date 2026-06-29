@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.legacy.utils.source import _format_spotify_track, _get_spotify_track, _search_spotify_tracks, _spotify_get_json
+from app.album_metadata import AlbumMetadataResolver, format_spotify_track
+from app.legacy.utils.source import _search_spotify_tracks, _spotify_get_json
 from app.library_writer import upsert_song_album_metadata
 from app.tools.gcs_backfill import load_dotenv
 
@@ -101,28 +102,18 @@ class AlbumBackfillStats:
 
 
 class SpotifyTrackCache:
-    def __init__(self, path: Path):
-        self.path = path
-        self.values: dict[str, dict[str, Any]] = {}
-        if path.exists():
-            self.values = json.loads(path.read_text(encoding="utf-8"))
+    def __init__(self, path: Path, *, resolver: str = "public-first"):
+        self.resolver = AlbumMetadataResolver(cache_path=path, resolver=resolver)
+
+    @property
+    def values(self) -> dict[str, dict[str, Any]]:
+        return self.resolver.cache
 
     async def get(self, spotify_id: str) -> dict[str, Any]:
-        if spotify_id not in self.values:
-            self.values[spotify_id] = _format_spotify_track(await _get_spotify_track(spotify_id))
-            self.flush()
-        return dict(self.values[spotify_id])
+        return dict(await self.resolver.resolve_track(spotify_id))
 
     async def preload(self, spotify_ids: list[str], *, batch_size: int = 50) -> None:
-        missing = self.missing_ids(spotify_ids)
-        if not missing:
-            return
-        for index in range(0, len(missing), batch_size):
-            batch = missing[index : index + batch_size]
-            fetched = await _get_spotify_tracks(batch)
-            for spotify_id in batch:
-                self.values[spotify_id] = fetched.get(spotify_id) or {"spotify_id": spotify_id}
-            self.flush()
+        await self.resolver.resolve_many(spotify_ids, prefer_api=self.resolver.resolver == "api-first")
 
     def missing_ids(self, spotify_ids: list[str]) -> list[str]:
         seen = set()
@@ -136,8 +127,7 @@ class SpotifyTrackCache:
         return missing
 
     def flush(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.values, indent=2, sort_keys=True), encoding="utf-8")
+        self.resolver.flush()
 
 
 async def _get_spotify_tracks(track_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -160,7 +150,7 @@ async def _get_spotify_tracks(track_ids: list[str]) -> dict[str, dict[str, Any]]
     for track in data.get("tracks") or []:
         if not isinstance(track, dict) or not track.get("id"):
             continue
-        tracks[str(track["id"])] = _format_spotify_track(track)
+        tracks[str(track["id"])] = format_spotify_track(track)
     return tracks
 
 
@@ -283,7 +273,7 @@ async def run_backfill(args: argparse.Namespace) -> AlbumBackfillStats:
     conn = await asyncpg.connect(database_url)
     stats = AlbumBackfillStats()
     actions: list[AlbumBackfillAction] = []
-    cache = SpotifyTrackCache(args.cache_path)
+    cache = SpotifyTrackCache(args.cache_path, resolver=args.resolver)
     try:
         song_ids = _song_ids_from_file(args.song_id_file)
         if args.song_id:
@@ -565,6 +555,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--song-id", default="")
     parser.add_argument("--song-id-file", type=Path)
     parser.add_argument("--cache-path", type=Path, default=Path("docs/reports/spotify_album_backfill_cache.json"))
+    parser.add_argument(
+        "--resolver",
+        choices=["public-first", "api-first", "api-only"],
+        default="public-first",
+        help="Album metadata resolver mode for Spotify track IDs.",
+    )
     parser.add_argument("--report-jsonl", type=Path)
     parser.add_argument("--review-output", type=Path)
     parser.add_argument("--dry-run", action="store_true", help="Compatibility flag; dry-run is default unless --apply is passed.")

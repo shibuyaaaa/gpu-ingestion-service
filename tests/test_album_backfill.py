@@ -78,6 +78,34 @@ async def test_album_backfill_can_skip_review_search_for_no_id_rows():
     assert action.review_candidates == []
 
 
+async def test_album_backfill_resolves_spotify_id_with_public_resolver(tmp_path, monkeypatch):
+    async def fake_public(self, spotify_id):
+        return {
+            "spotify_id": spotify_id,
+            "album_id": "album-1",
+            "album": "Resolved Album",
+            "album_type": "single",
+            "metadata_source": "spotify_public_page",
+        }
+
+    monkeypatch.setattr("app.album_metadata.AlbumMetadataResolver._fetch_public_track_metadata", fake_public)
+
+    cache = SpotifyTrackCache(tmp_path / "cache.json", resolver="public-first")
+    song = SongAlbumSnapshot(
+        id="song-1",
+        title="Song",
+        artists=["Artist"],
+        analysis_json={"gpu_ingestion": {"source": "spotify:track:track-1", "spotify_metadata": {"spotify_id": "track-1"}}},
+    )
+
+    action = await plan_album_action(song, cache, allow_review_search=False)
+
+    assert action.action_type == "upsert_album_link"
+    assert action.source == "spotify_track"
+    assert action.metadata["album_id"] == "album-1"
+    assert action.metadata["metadata_source"] == "spotify_public_page"
+
+
 async def test_album_backfill_auto_applies_exact_title_artist_search_match(monkeypatch):
     class Cache:
         async def get(self, spotify_id):

@@ -45,6 +45,27 @@ class FakeLibrary:
         return FakeLibraryResult(metadata.get("spotify_id") in self.existing_ids)
 
 
+class FakeAlbumResolver:
+    async def enrich_candidates(self, candidates: list[ChartCandidate], *, prefer_api: bool = True) -> list[ChartCandidate]:
+        assert prefer_api is True
+        enriched = []
+        for candidate in candidates:
+            enriched.append(
+                ChartCandidate(
+                    **{
+                        **candidate.__dict__,
+                        "album_id": f"album-{candidate.spotify_id}",
+                        "album": f"Album {candidate.spotify_id}",
+                        "album_art_highres": "https://cover",
+                        "album_art_url": "https://cover",
+                        "album_artists": [{"id": "artist-1", "name": candidate.artist}],
+                        "album_type": "single",
+                    }
+                )
+            )
+        return enriched
+
+
 class FakeOps:
     def __init__(self, *, unavailable: bool = False):
         self.states: dict[str, JobTerminalState] = {}
@@ -237,6 +258,30 @@ async def test_crawler_submits_candidates_in_provider_source_order():
             "spotify:track:global-hit",
             "spotify:track:canada-hit",
         ]
+
+
+async def test_crawler_publishes_album_enriched_metadata():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = _settings(tmp, batch_size=1)
+        store = CrawlerStore(Path(tmp) / "crawler.sqlite3")
+        provider = FakeProvider([_candidate("track-1", popularity=100, rank=1)])
+        publisher = FakePublisher()
+        runner = CrawlerRunner(
+            settings=settings,
+            store=store,
+            provider=provider,
+            publisher=publisher,
+            ops=FakeOps(),
+            library=FakeLibrary(),
+            album_resolver=FakeAlbumResolver(),
+        )
+
+        await runner.run_once()
+
+        metadata = publisher.payloads[0]["spotify_metadata"]
+        assert metadata["album_id"] == "album-track-1"
+        assert metadata["album"] == "Album track-1"
+        assert metadata["album_art_highres"] == "https://cover"
 
 
 async def test_crawler_completes_empty_session_when_no_publishable_candidates_found():

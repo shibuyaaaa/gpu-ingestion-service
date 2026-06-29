@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from app.analysis_enrichment import enrich_analysis
+from app.album_metadata import AlbumMetadataResolver, extract_spotify_track_id
 from app.identity import ingestion_identity_key, safe_identity_part
 from app.jobs.base import JobAdapter, StageResult
 from app.jobs.context import JobContext
@@ -42,6 +43,7 @@ _GCS_SEGMENT_UPLOAD_URL_CACHE: OrderedDict[str, str] = OrderedDict()
 _GCS_SEGMENT_UPLOAD_DISK_CACHE_INITIALIZED: set[str] = set()
 _GCS_SEGMENT_UPLOAD_DISK_CACHE_LOCK = threading.Lock()
 _MAX_CACHE_LOCKS = 2048
+_ALBUM_METADATA_RESOLVER: AlbumMetadataResolver | None = None
 
 
 class DissectAdapter(JobAdapter):
@@ -2157,13 +2159,13 @@ def _minimal_youtube_resolved(source: str) -> dict[str, Any]:
 async def _enrich_payload_spotify_metadata_if_needed(*, source: str, metadata: dict[str, Any]) -> dict[str, Any]:
     if not _payload_spotify_metadata_needs_enrichment(source=source, metadata=metadata):
         return metadata
+    spotify_id = extract_spotify_track_id(source) or str(metadata.get("spotify_id") or "").strip()
+    if not spotify_id:
+        return _with_default_music_genre(metadata)
     try:
-        resolved = await resolve_source_metadata(source)
+        enriched = await _album_metadata_resolver().resolve_track(spotify_id, existing=metadata)
     except Exception:
-        return metadata
-    enriched = resolved.get("spotify_metadata")
-    if not isinstance(enriched, dict):
-        return metadata
+        return _with_default_music_genre(metadata)
     return _with_default_music_genre(_merge_metadata_prefer_enriched(enriched, metadata))
 
 
@@ -2199,6 +2201,13 @@ def _with_default_music_genre(metadata: dict[str, Any]) -> dict[str, Any]:
         "genres": ["Music"],
         "genre_source": "fallback_music",
     }
+
+
+def _album_metadata_resolver() -> AlbumMetadataResolver:
+    global _ALBUM_METADATA_RESOLVER
+    if _ALBUM_METADATA_RESOLVER is None:
+        _ALBUM_METADATA_RESOLVER = AlbumMetadataResolver(resolver="public-first")
+    return _ALBUM_METADATA_RESOLVER
 
 
 def _truthy_metadata_value(value: Any) -> bool:
