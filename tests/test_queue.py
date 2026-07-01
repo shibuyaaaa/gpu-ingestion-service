@@ -121,6 +121,37 @@ def test_fail_stage_respects_max_attempts():
         assert second.attempts == 2
 
 
+def test_recover_failed_download_auth_jobs_after_cookie_refresh():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)
+        old_auth, _ = store.enqueue(
+            {"job_id": "old-auth", "job_type": "bulk_dissect", "source": "song"},
+            max_attempts=1,
+        )
+        old_private, _ = store.enqueue(
+            {"job_id": "old-private", "job_type": "bulk_dissect", "source": "song"},
+            max_attempts=1,
+        )
+        store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        failed_auth = store.fail_stage(old_auth.id, "auth_required: Sign in to confirm you're not a bot", retry_delay_seconds=0)
+        store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        store.fail_stage(old_private.id, "private video", retry_delay_seconds=0)
+
+        recovered = store.recover_failed_download_auth_jobs(
+            refreshed_after=failed_auth.updated_at + 1,
+            limit=10,
+        )
+
+        assert recovered == 1
+        retried = store.get("old-auth")
+        assert retried.status == JobStatus.QUEUED
+        assert retried.attempts == 0
+        assert retried.error is None
+        assert store.get("old-private").status == JobStatus.FAILED
+        events = store.recent_events("old-auth", limit=5)
+        assert events[0]["event_type"] == "auth_refresh_retry"
+
+
 def test_claim_batch_respects_limit():
     with tempfile.TemporaryDirectory() as tmp:
         store = JobStore(Path(tmp) / "queue.sqlite3", max_depth=10)

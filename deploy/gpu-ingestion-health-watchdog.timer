@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Shibuya GPU ingestion health watchdog every minute
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Unit=gpu-ingestion-health-watchdog.service
+
+[Install]
+WantedBy=timers.target

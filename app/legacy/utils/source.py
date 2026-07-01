@@ -6,7 +6,7 @@ import re
 import shutil
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,11 @@ TRANSIENT_YTDLP_ERROR_RE = re.compile(
     r"(HTTP Error (?:403|408|409|425|429|5\d\d)|timed out|timeout|temporar(?:y|ily)|unavailable|try again)",
     re.IGNORECASE,
 )
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
 
 _spotify_access_token: str | None = None
 _spotify_token_expires_at = 0.0
@@ -28,6 +33,12 @@ _youtube_token_cache: dict[str, Any] | None = None
 _youtube_token_cache_time: datetime | None = None
 _youtube_cookies_path: str | None = None
 _youtube_cookies_cache_time: datetime | None = None
+
+
+class DownloadError(RuntimeError):
+    def __init__(self, message: str, category: str = "unknown"):
+        super().__init__(message)
+        self.category = category
 
 
 async def resolve_spotify_source(source: str, *, max_youtube_results: int = 5) -> dict[str, Any]:
@@ -101,41 +112,130 @@ async def download_youtube_audio(youtube_url: str, output_dir: str | Path) -> st
     template = str(output / "source.%(ext)s")
     attempts = max(1, _int_env("YTDLP_DOWNLOAD_ATTEMPTS", 3))
     retry_delay = max(0.0, _float_env("YTDLP_RETRY_DELAY_SECONDS", 2.0))
+    timeout_seconds = max(10.0, _float_env("YTDLP_DOWNLOAD_TIMEOUT_SECONDS", 120.0))
     last_error = ""
-    for attempt in range(1, attempts + 1):
-        _remove_partial_ytdlp_outputs(output)
-        proc = await asyncio.create_subprocess_exec(
-            "yt-dlp",
-            *_yt_dlp_common_args(),
-            "-x",
-            "--audio-format",
-            "wav",
-            "-o",
-            template,
-            youtube_url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    last_category = "unknown"
+    for strategy in _yt_dlp_download_strategies():
+        for attempt in range(1, attempts + 1):
+            _remove_partial_ytdlp_outputs(output)
+            error_text = await _run_ytdlp_download_strategy(
+                youtube_url=youtube_url,
+                template=template,
+                strategy=strategy,
+                timeout_seconds=timeout_seconds,
+            )
+            if error_text is None:
+                matches = sorted(output.glob("source.*"))
+                if matches:
+                    logger.info("yt-dlp download succeeded with strategy %s", strategy["name"])
+                    return str(matches[0])
+                error_text = "yt-dlp did not produce an audio file"
+            last_error = error_text
+            last_category = _categorize_ytdlp_error(error_text)
+            if _is_terminal_ytdlp_error(last_category):
+                raise DownloadError(last_error, last_category)
+            if not _is_transient_ytdlp_error(error_text) or attempt >= attempts:
+                break
+            error_lines = error_text.strip().splitlines()
+            logger.warning(
+                "yt-dlp %s failed transiently on attempt %d/%d: %s",
+                strategy["name"],
+                attempt,
+                attempts,
+                error_lines[-1] if error_lines else error_text,
+            )
+            if retry_delay:
+                await asyncio.sleep(retry_delay)
+        if last_error:
+            logger.warning(
+                "yt-dlp strategy %s failed (%s): %s",
+                strategy["name"],
+                last_category,
+                _last_error_line(last_error),
+            )
+    raise DownloadError(last_error or "yt-dlp did not produce an audio file", last_category)
+
+
+def _yt_dlp_download_strategies() -> list[dict[str, Any]]:
+    strategies: list[dict[str, Any]] = []
+    payload = _load_youtube_token_payload() or {}
+    po_token = str(payload.get("po_token") or "").strip()
+    visitor_data = str(payload.get("visitor_data") or "").strip()
+    if po_token and visitor_data:
+        strategies.append(
+            {
+                "name": "po_token_web_cookies",
+                "use_cookies": True,
+                "extractor_args": [f"youtube:player_client=web;po_token=web+{po_token};visitor_data={visitor_data}"],
+            }
         )
-        _, stderr = await proc.communicate()
-        error_text = stderr.decode("utf-8", errors="replace")[-1000:]
-        if proc.returncode == 0:
-            matches = sorted(output.glob("source.*"))
-            if matches:
-                return str(matches[0])
-            error_text = "yt-dlp did not produce an audio file"
-        last_error = error_text
-        if attempt >= attempts or (proc.returncode != 0 and not _is_transient_ytdlp_error(error_text)):
-            break
-        error_lines = error_text.strip().splitlines()
-        logger.warning(
-            "yt-dlp download failed transiently on attempt %d/%d: %s",
-            attempt,
-            attempts,
-            error_lines[-1] if error_lines else error_text,
+        strategies.append(
+            {
+                "name": "po_token_web_no_cookies",
+                "use_cookies": False,
+                "extractor_args": [f"youtube:player_client=web;po_token=web+{po_token};visitor_data={visitor_data}"],
+            }
         )
-        if retry_delay:
-            await asyncio.sleep(retry_delay)
-    raise RuntimeError(last_error or "yt-dlp did not produce an audio file")
+    strategies.extend(
+        [
+            {"name": "auto_cookies", "use_cookies": True, "extractor_args": []},
+            {"name": "auto_no_cookies", "use_cookies": False, "extractor_args": []},
+            {"name": "web_js_cookies", "use_cookies": True, "extractor_args": ["youtube:player_client=web"]},
+            {"name": "web_js_no_cookies", "use_cookies": False, "extractor_args": ["youtube:player_client=web"]},
+            {"name": "android_vr_cookies", "use_cookies": True, "extractor_args": ["youtube:player_client=android_vr"]},
+            {"name": "android_vr_no_cookies", "use_cookies": False, "extractor_args": ["youtube:player_client=android_vr"]},
+            {"name": "ios_cookies", "use_cookies": True, "extractor_args": ["youtube:player_client=ios"]},
+            {"name": "ios_no_cookies", "use_cookies": False, "extractor_args": ["youtube:player_client=ios"]},
+        ]
+    )
+    return strategies
+
+
+async def _run_ytdlp_download_strategy(
+    *,
+    youtube_url: str,
+    template: str,
+    strategy: dict[str, Any],
+    timeout_seconds: float,
+) -> str | None:
+    cmd = [
+        "yt-dlp",
+        *_yt_dlp_common_args(
+            use_cookies=bool(strategy.get("use_cookies", True)),
+            extractor_args=list(strategy.get("extractor_args") or []),
+        ),
+        "-f",
+        "bestaudio/best",
+        "-x",
+        "--audio-format",
+        "wav",
+        "--audio-quality",
+        "192K",
+        "-o",
+        template,
+        "--socket-timeout",
+        str(max(5, int(timeout_seconds / 4))),
+        "--retries",
+        "1",
+        "--user-agent",
+        USER_AGENT,
+        "--no-warnings",
+        youtube_url,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        await _terminate_process(proc)
+        return f"yt-dlp strategy {strategy['name']} timed out after {timeout_seconds:.0f}s"
+    output_text = (stderr + b"\n" + stdout).decode("utf-8", errors="replace")[-2000:]
+    if proc.returncode == 0:
+        return None
+    return output_text or f"yt-dlp exited with status {proc.returncode}"
 
 
 def extract_youtube_video_id(source: str) -> str | None:
@@ -145,6 +245,46 @@ def extract_youtube_video_id(source: str) -> str | None:
 
 def _is_transient_ytdlp_error(error_text: str) -> bool:
     return bool(TRANSIENT_YTDLP_ERROR_RE.search(error_text or ""))
+
+
+def _categorize_ytdlp_error(error_text: str) -> str:
+    lowered = (error_text or "").lower()
+    if "sign in" in lowered or "login" in lowered or "not a bot" in lowered or "cookies-from-browser" in lowered:
+        return "auth_required"
+    if "429" in lowered or "rate" in lowered or "too many" in lowered:
+        return "rate_limit"
+    if "private" in lowered:
+        return "private_video"
+    if "age" in lowered or "confirm your age" in lowered:
+        return "age_restricted"
+    if "copyright" in lowered or "blocked" in lowered:
+        return "copyright_blocked"
+    if "unavailable" in lowered or "removed" in lowered or "deleted" in lowered:
+        return "unavailable"
+    if "not exist" in lowered or "invalid" in lowered:
+        return "invalid_url"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "timeout"
+    return "unknown"
+
+
+def _is_terminal_ytdlp_error(category: str) -> bool:
+    return category in {"private_video", "copyright_blocked", "invalid_url", "unavailable", "age_restricted"}
+
+
+def _last_error_line(error_text: str) -> str:
+    lines = [line.strip() for line in (error_text or "").splitlines() if line.strip()]
+    return lines[-1] if lines else error_text
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    proc.kill()
+    try:
+        await asyncio.wait_for(proc.communicate(), timeout=5)
+    except asyncio.TimeoutError:
+        logger.warning("timed out waiting for yt-dlp process to exit after kill")
 
 
 def _remove_partial_ytdlp_outputs(output_dir: Path) -> None:
@@ -501,9 +641,11 @@ async def _search_youtube(query: str, *, max_results: int) -> list[dict[str, Any
     return results
 
 
-def _yt_dlp_common_args() -> list[str]:
+def _yt_dlp_common_args(*, use_cookies: bool = True, extractor_args: list[str] | None = None) -> list[str]:
     args = _yt_dlp_js_args()
-    cookies_path = _get_youtube_cookies_path()
+    for extractor_arg in extractor_args or []:
+        args.extend(["--extractor-args", extractor_arg])
+    cookies_path = _get_youtube_cookies_path() if use_cookies else None
     if cookies_path:
         args.extend(["--cookies", cookies_path])
     return args
@@ -572,6 +714,36 @@ def _load_youtube_token_payload() -> dict[str, Any] | None:
     _youtube_token_cache = payload
     _youtube_token_cache_time = datetime.utcnow()
     return payload
+
+
+def youtube_auth_status() -> dict[str, Any]:
+    payload = _load_youtube_token_payload()
+    cookies = payload.get("cookies") if isinstance(payload, dict) else None
+    extracted_at = payload.get("extracted_at") if isinstance(payload, dict) else None
+    extracted_epoch = _parse_utc_epoch(str(extracted_at)) if extracted_at else None
+    return {
+        "has_po_token": bool(payload and payload.get("po_token")),
+        "has_visitor_data": bool(payload and payload.get("visitor_data")),
+        "has_cookies": bool(isinstance(cookies, list) and cookies),
+        "cookie_count": len(cookies) if isinstance(cookies, list) else 0,
+        "is_authenticated": bool(payload and payload.get("is_authenticated")),
+        "is_logged_in": bool(payload and payload.get("is_logged_in")),
+        "extracted_at": extracted_at,
+        "extracted_epoch": extracted_epoch,
+        "age_seconds": round(time.time() - extracted_epoch, 3) if extracted_epoch else None,
+    }
+
+
+def _parse_utc_epoch(value: str) -> float | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.timestamp()
 
 
 def _download_youtube_gcs_text(blob_path: str) -> str | None:

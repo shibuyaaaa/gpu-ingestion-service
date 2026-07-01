@@ -285,6 +285,45 @@ async def test_download_youtube_audio_passes_configured_cookies(monkeypatch, tmp
     assert calls[0][calls[0].index("--cookies") + 1] == str(cookies_path)
 
 
+@pytest.mark.asyncio
+async def test_download_youtube_audio_falls_back_after_auth_required(monkeypatch, tmp_path):
+    calls = []
+    cookies_path = tmp_path / "cookies.txt"
+    cookies_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+    class FakeProc:
+        def __init__(self, returncode: int, stderr: bytes, *, write_output: bool = False):
+            self.returncode = returncode
+            self.stderr = stderr
+            self.write_output = write_output
+
+        async def communicate(self):
+            if self.write_output:
+                (tmp_path / "source.wav").write_bytes(b"audio")
+            return b"", self.stderr
+
+        def kill(self):
+            self.returncode = -9
+
+    async def fake_create_subprocess_exec(*cmd, stdout, stderr):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return FakeProc(1, b"ERROR: Sign in to confirm you're not a bot\n")
+        return FakeProc(0, b"", write_output=True)
+
+    monkeypatch.setenv("YTDLP_COOKIES_PATH", str(cookies_path))
+    monkeypatch.setenv("YTDLP_DOWNLOAD_ATTEMPTS", "3")
+    monkeypatch.setattr("app.legacy.utils.source.shutil.which", lambda binary: "/usr/bin/yt-dlp")
+    monkeypatch.setattr("app.legacy.utils.source.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await download_youtube_audio("https://www.youtube.com/watch?v=dQw4w9WgXcQ", tmp_path)
+
+    assert result == str(tmp_path / "source.wav")
+    assert len(calls) == 2
+    assert "--cookies" in calls[0]
+    assert "--cookies" not in calls[1]
+
+
 def test_yt_dlp_common_args_writes_current_payload_cookies(monkeypatch, tmp_path):
     source_module._youtube_token_cache = None
     source_module._youtube_token_cache_time = None

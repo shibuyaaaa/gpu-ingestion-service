@@ -10,6 +10,11 @@ DOCKER_IMAGE_PRUNE_ARGS="${DOCKER_IMAGE_PRUNE_ARGS:--a -f}"
 cd "$(dirname "$0")/.."
 
 git pull --ff-only
+sudo install -m 0755 deploy/gpu-ingestion-health-watchdog.sh /usr/local/bin/gpu-ingestion-health-watchdog.sh
+sudo cp deploy/gpu-ingestion-health-watchdog.service /etc/systemd/system/gpu-ingestion-health-watchdog.service
+sudo cp deploy/gpu-ingestion-health-watchdog.timer /etc/systemd/system/gpu-ingestion-health-watchdog.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now gpu-ingestion-health-watchdog.timer >/dev/null
 sudo docker build -t "${IMAGE}" -f deploy/Dockerfile .
 sudo systemctl restart "${SERVICE_NAME}"
 sudo systemctl restart "${CRAWLER_SERVICE_NAME}"

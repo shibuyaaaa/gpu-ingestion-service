@@ -118,6 +118,10 @@ fi
 
 sudo cp deploy/gpu-ingestion.service /etc/systemd/system/gpu-ingestion.service
 sudo cp deploy/gpu-ingestion-crawler.service /etc/systemd/system/gpu-ingestion-crawler.service
+sudo install -m 0755 deploy/gpu-ingestion-health-watchdog.sh /usr/local/bin/gpu-ingestion-health-watchdog.sh
+sudo cp deploy/gpu-ingestion-health-watchdog.service /etc/systemd/system/gpu-ingestion-health-watchdog.service
+sudo cp deploy/gpu-ingestion-health-watchdog.timer /etc/systemd/system/gpu-ingestion-health-watchdog.timer
 sudo systemctl daemon-reload
 echo "Edit /etc/gpu-ingestion.env, then run: sudo systemctl enable --now gpu-ingestion"
 echo "For autonomous crawling, set CRAWLER_ENABLED=true and CRAWLER_KWORB_CHART_URLS, then run: sudo systemctl enable --now gpu-ingestion-crawler"
+echo "Enable health recovery with: sudo systemctl enable --now gpu-ingestion-health-watchdog.timer"

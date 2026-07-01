@@ -638,6 +638,80 @@ class JobStore:
             available_at=now,
         )
 
+    def recover_failed_download_auth_jobs(self, *, refreshed_after: float, limit: int = 100) -> int:
+        if refreshed_after <= 0 or limit <= 0:
+            return 0
+        now = time.time()
+        patterns = (
+            "%auth_required%",
+            "%Sign in to confirm%",
+            "%not a bot%",
+            "%cookies-from-browser%",
+            "%login%",
+        )
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT id, error
+                    FROM jobs
+                    WHERE status = ?
+                      AND stage = ?
+                      AND updated_at < ?
+                      AND (
+                        error LIKE ?
+                        OR error LIKE ?
+                        OR error LIKE ?
+                        OR error LIKE ?
+                        OR error LIKE ?
+                      )
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    (
+                        JobStatus.FAILED.value,
+                        JobStage.DOWNLOAD.value,
+                        refreshed_after,
+                        *patterns,
+                        limit,
+                    ),
+                ).fetchall()
+                if not rows:
+                    conn.execute("COMMIT")
+                    return 0
+                job_ids = [row["id"] for row in rows]
+                placeholders = ",".join("?" for _ in job_ids)
+                conn.execute(
+                    f"""
+                    UPDATE jobs
+                    SET status = ?,
+                        worker_id = NULL,
+                        attempts = 0,
+                        error = NULL,
+                        updated_at = ?,
+                        available_at = ?
+                    WHERE id IN ({placeholders})
+                    """,
+                    (JobStatus.QUEUED.value, now, now, *job_ids),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        for row in rows:
+            self.add_event(
+                row["id"],
+                JobEventType.AUTH_REFRESH_RETRY,
+                message="requeued failed YouTube auth download after cookie refresh",
+                data={
+                    "refreshed_after": refreshed_after,
+                    "previous_error": str(row["error"] or "")[:1000],
+                },
+            )
+        return len(rows)
+
     def reconcile_failed_fanout_parent(self, root_job_id: str) -> JobRecord | None:
         record = self.get(root_job_id)
         if record is None or record.status != JobStatus.FAILED:

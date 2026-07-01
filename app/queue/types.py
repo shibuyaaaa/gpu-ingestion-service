@@ -32,6 +32,7 @@ class JobEventType(StringEnum):
     FAILED = "failed"
     MANUAL_RETRY = "manual_retry"
     LEASE_RECOVERED = "lease_recovered"
+    AUTH_REFRESH_RETRY = "auth_refresh_retry"
     CONTINUATION_ENQUEUED = "continuation_enqueued"
     PROCESS_CHILD_ENQUEUED = "process_child_enqueued"
     FANOUT_PARENT_RECONCILED = "fanout_parent_reconciled"

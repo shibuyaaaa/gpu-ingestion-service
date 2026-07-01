@@ -12,6 +12,7 @@ from typing import Any
 from app.jobs import JobRegistry
 from app.jobs.context import JobContext
 from app.legacy.audio import AudioOps
+from app.legacy.utils.source import DownloadError, youtube_auth_status
 from app.queue import JobRecord, JobStage
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,15 @@ class WorkerManager:
             "last_error": None,
             "timeout_seconds": context.settings.job_lease_timeout_seconds,
         }
+        self._youtube_auth_recovery_state: dict[str, Any] = {
+            "enabled": context.settings.youtube_auth_recovery_enabled,
+            "checks": 0,
+            "last_check_at": None,
+            "last_error": None,
+            "last_refreshed_epoch": None,
+            "last_requeued": 0,
+            "total_requeued": 0,
+        }
 
     async def start(self) -> None:
         if self._tasks:
@@ -110,6 +120,8 @@ class WorkerManager:
             self._tasks.append(asyncio.create_task(self._gpu_health_loop(), name="gpu-health"))
         if self._job_watchdog_state["enabled"]:
             self._tasks.append(asyncio.create_task(self._job_watchdog_loop(), name="job-watchdog"))
+        if self._youtube_auth_recovery_state["enabled"]:
+            self._tasks.append(asyncio.create_task(self._youtube_auth_recovery_loop(), name="youtube-auth-recovery"))
         logger.info("started %d local workers", len(self._tasks))
 
     async def stop(self) -> None:
@@ -180,11 +192,11 @@ class WorkerManager:
             logger.exception("job %s stage %s failed", job.id, job.stage)
             self.context.store.fail_stage(
                 job.id,
-                str(exc),
+                _job_error_text(exc),
                 retry_delay_seconds=self._retry_delay_seconds(job),
             )
             state.failures += 1
-            state.last_error = str(exc)
+            state.last_error = _job_error_text(exc)
         finally:
             state.active_job_ids = [job_id for job_id in state.active_job_ids if job_id != job.id]
             state.active_job_started_at.pop(job.id, None)
@@ -287,6 +299,40 @@ class WorkerManager:
             )
             os._exit(76)
 
+    async def _youtube_auth_recovery_loop(self) -> None:
+        interval = max(30.0, float(self.context.settings.youtube_auth_recovery_interval_seconds))
+        while not self._stop_event.is_set():
+            await self._youtube_auth_recovery_once()
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _youtube_auth_recovery_once(self) -> None:
+        self._youtube_auth_recovery_state["checks"] += 1
+        self._youtube_auth_recovery_state["last_check_at"] = time.time()
+        try:
+            status = await asyncio.to_thread(youtube_auth_status)
+            refreshed_epoch = status.get("extracted_epoch")
+            self._youtube_auth_recovery_state["last_refreshed_epoch"] = refreshed_epoch
+            if not refreshed_epoch or not status.get("has_cookies"):
+                self._youtube_auth_recovery_state["last_requeued"] = 0
+                self._youtube_auth_recovery_state["last_error"] = "YouTube auth payload has no refreshed cookies"
+                return
+            requeued = await asyncio.to_thread(
+                self.context.store.recover_failed_download_auth_jobs,
+                refreshed_after=float(refreshed_epoch),
+                limit=max(1, int(self.context.settings.youtube_auth_recovery_batch_size)),
+            )
+            self._youtube_auth_recovery_state["last_requeued"] = requeued
+            self._youtube_auth_recovery_state["total_requeued"] += requeued
+            self._youtube_auth_recovery_state["last_error"] = None
+            if requeued:
+                logger.warning("requeued %d failed YouTube auth download job(s) after cookie refresh", requeued)
+        except Exception as exc:
+            logger.exception("YouTube auth recovery failed")
+            self._youtube_auth_recovery_state["last_error"] = str(exc)
+
     def _overdue_active_jobs(self, *, now: float | None = None) -> list[dict[str, Any]]:
         current_time = time.time() if now is None else now
         timeout = max(1.0, float(self.context.settings.job_lease_timeout_seconds))
@@ -330,6 +376,7 @@ class WorkerManager:
                 **self._job_watchdog_state,
                 "overdue_active_jobs": self._overdue_active_jobs(),
             },
+            "youtube_auth_recovery": self._youtube_auth_recovery_state,
             "scheduling": {
                 "download_workers": self.context.settings.download_workers,
                 "download_batch_size": self.context.settings.download_batch_size,
@@ -362,3 +409,9 @@ def _directory_size(path: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def _job_error_text(exc: Exception) -> str:
+    if isinstance(exc, DownloadError):
+        return f"{exc.category}: {exc}"
+    return str(exc)

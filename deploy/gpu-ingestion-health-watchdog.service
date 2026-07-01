@@ -1,0 +1,9 @@
+[Unit]
+Description=Check and recover Shibuya GPU ingestion health
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/gpu-ingestion.env
+ExecStart=/usr/local/bin/gpu-ingestion-health-watchdog.sh

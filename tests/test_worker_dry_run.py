@@ -109,6 +109,37 @@ def test_worker_watchdog_reports_overdue_active_jobs():
         assert manager_state["job_watchdog"]["overdue_active_jobs"][0]["job_id"] == "stuck-job"
 
 
+async def test_youtube_auth_recovery_loop_requeues_failed_downloads(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        settings = Settings(
+            queue_db_path=root / "queue.sqlite3",
+            work_dir=root / "work",
+            start_workers=False,
+            youtube_auth_recovery_batch_size=10,
+        )
+        store = JobStore(settings.queue_db_path, max_depth=10)
+        job, _ = store.enqueue(
+            {"job_id": "auth-failed", "job_type": "quick_dissect", "source": "song"},
+            max_attempts=1,
+        )
+        store.claim_next([JobStage.DOWNLOAD], "worker-1")
+        failed = store.fail_stage(job.id, "auth_required: Sign in to confirm you're not a bot", retry_delay_seconds=0)
+        manager = WorkerManager(context=SimpleNamespace(settings=settings, store=store), registry=None)
+
+        monkeypatch.setattr(
+            "app.workers.manager.youtube_auth_status",
+            lambda: {"has_cookies": True, "extracted_epoch": failed.updated_at + 1},
+        )
+
+        await manager._youtube_auth_recovery_once()
+
+        recovered = store.get(job.id)
+        assert recovered.status == JobStatus.QUEUED
+        assert manager.state()["youtube_auth_recovery"]["last_requeued"] == 1
+        assert manager.state()["youtube_auth_recovery"]["last_error"] is None
+
+
 async def test_worker_reconciles_parent_only_when_fanout_maybe_complete():
     class FakeAdapter:
         def __init__(self, *, fanout_maybe_complete: bool):
